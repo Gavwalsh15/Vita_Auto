@@ -1,0 +1,28 @@
+name: Bug report
+description: Report an error or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the setup guide and existing issues before reporting a bug.
+        Include the release version, error code/name, and `ux0:data/vita_auto/vita_auto.log` when available.
+
+  - type: textarea
+    attributes:
+      label: Summary
+      description: |
+        A clear and concise description of the bug, including a minimal reproducible example.
+        If we cannot reproduce the bug, it is unlikely that we will be able to help you.
+
+        Describe the steps, what you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: input
+    attributes:
+      label: Hardware and software
+      description: Include Vita model/firmware, phone model/Android version, Vita Auto version and build flavor, and your powered USB setup.
+      placeholder: Vita 1000 or 2000, firmware, phone, Android version, quiet or diagnostic build, adapter/cable
+    validations:
+      required: true

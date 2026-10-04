@@ -1,0 +1,5 @@
+# Keep patches and Linux CI scripts usable after Windows checkouts.
+*.patch text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.cmake text eol=lf

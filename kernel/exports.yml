@@ -1,0 +1,28 @@
+vita_auto_usb:
+  attributes: 0
+  version:
+    major: 0
+    minor: 1
+  main:
+    start: module_start
+    stop: module_stop
+  libraries:
+    VitaAutoUSBForUser:
+      syscall: true
+      functions:
+        - ksceVitaAutoUsbGetState: 0xA0A00001
+        - ksceVitaAutoUsbWrite: 0xA0A00003
+        - ksceVitaAutoUsbGetAccessoryActivateResult: 0xA0A00004
+        - ksceVitaAutoUsbGetHostModeResult: 0xA0A00005
+        - ksceVitaAutoUsbGetDriverRegisterResult: 0xA0A00006
+        - ksceVitaAutoUsbGetLastVidPid: 0xA0A00007
+        - ksceVitaAutoUsbGetLastFailureStage: 0xA0A00008
+        - ksceVitaAutoUsbGetLastFailureResult: 0xA0A00009
+        - ksceVitaAutoUsbGetLastFailureCount: 0xA0A0000A
+        - ksceVitaAutoUsbStart: 0xA0A0000B
+        - ksceVitaAutoUsbGetCurrentHostMode: 0xA0A0000C
+        - ksceVitaAutoUsbGetRxDiagnostics: 0xA0A0000D
+        - ksceVitaAutoUsbWake: 0xA0A0000F
+        - ksceVitaAutoUsbReadWaitTimed: 0xA0A00010
+        - ksceVitaAutoUsbStop: 0xA0A00011
+        - ksceVitaAutoUsbDrainReads: 0xA0A00012

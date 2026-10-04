@@ -1,0 +1,36 @@
+name: Build Vita Auto
+description: Build the app and USB plugins using the installed VitaSDK.
+
+inputs:
+  verbose-logging:
+    description: Include non-critical startup and runtime logs (ON or OFF).
+    default: 'OFF'
+  performance:
+    description: Include performance counters and reports (ON or OFF).
+    default: 'OFF'
+
+runs:
+  using: composite
+  steps:
+    - name: Configure and apply dependency patch
+      shell: bash
+      env:
+        VERBOSE_LOGGING: ${{ inputs.verbose-logging }}
+        PERFORMANCE: ${{ inputs.performance }}
+      run: |
+        cmake -S . -B build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_TOOLCHAIN_FILE="$VITASDK/share/vita.toolchain.cmake" \
+          -DVITA_AUTO_VERBOSE_LOGGING="$VERBOSE_LOGGING" \
+          -DVITA_AUTO_PERFORMANCE="$PERFORMANCE"
+
+    - name: Build installables
+      shell: bash
+      run: cmake --build build --parallel 2
+
+    - name: Verify installables
+      shell: bash
+      run: |
+        for artifact in vita_auto.vpk vita_auto_usb.skprx vita_auto_usb_client.suprx; do
+          test -s "dist/$artifact"
+        done

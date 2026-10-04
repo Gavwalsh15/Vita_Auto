@@ -1,0 +1,29 @@
+vita_auto_usb_c:
+  attributes: 0
+  version:
+    major: 0
+    minor: 1
+  main:
+    start: module_start
+    stop: module_stop
+  libraries:
+    VitaAutoUsbClient:
+      syscall: false
+      functions:
+        - vitaAutoUsbClientLoad: 0xA0A01001
+        - vitaAutoUsbGetState: 0xA0A01002
+        - vitaAutoUsbWrite: 0xA0A01004
+        - vitaAutoUsbGetAccessoryActivateResult: 0xA0A01005
+        - vitaAutoUsbGetHostModeResult: 0xA0A01006
+        - vitaAutoUsbGetDriverRegisterResult: 0xA0A01007
+        - vitaAutoUsbGetLastVidPid: 0xA0A01008
+        - vitaAutoUsbGetLastFailureStage: 0xA0A01009
+        - vitaAutoUsbGetLastFailureResult: 0xA0A0100A
+        - vitaAutoUsbGetLastFailureCount: 0xA0A0100B
+        - vitaAutoUsbStart: 0xA0A0100C
+        - vitaAutoUsbGetCurrentHostMode: 0xA0A0100D
+        - vitaAutoUsbGetRxDiagnostics: 0xA0A0100E
+        - vitaAutoUsbWake: 0xA0A01010
+        - vitaAutoUsbReadWaitTimed: 0xA0A01011
+        - vitaAutoUsbStop: 0xA0A01012
+        - vitaAutoUsbDrainReads: 0xA0A01013
