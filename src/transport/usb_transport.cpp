@@ -110,7 +110,13 @@ bool UsbTransport::open(bool (*cancelled)())
         }
 
         if (state == VITA_AUTO_USB_FAILED) {
-            fail(app::AppError::UsbEnumerationFailed, vitaAutoUsbGetLastFailureResult());
+            const bool stale = vitaAutoUsbGetLastFailureStage() ==
+                VITA_AUTO_USB_FAILURE_STALE_ACCESSORY;
+            fail(
+                stale ? app::AppError::UsbStaleAccessory
+                      : app::AppError::UsbEnumerationFailed,
+                vitaAutoUsbGetLastFailureResult()
+            );
             logRxDiagnostics("open-failed");
             return false;
         }

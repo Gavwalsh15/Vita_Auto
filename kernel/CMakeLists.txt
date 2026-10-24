@@ -32,6 +32,7 @@ target_link_libraries(vita_auto_usb_kernel PRIVATE
     SceDebugForDriver_stub
     SceSysmemForDriver_stub
     SceThreadmgrForDriver_stub
+    SceKernelSuspendForDriver_stub
 )
 
 vita_create_self(
