@@ -1,29 +1,4 @@
 int _start(SceSize argc, const void *args) __attribute__((weak, alias("module_start")));
-{
-    (void)eventid;
-    (void)args;
-    (void)opt;
-    if (resume)
-        __sync_lock_test_and_set(&g_hostModeResumePending, 1);
-    return 0;
-}
-
-static void restoreHostModeAfterResume(void)
-{
-    int result;
-    if (!__sync_lock_test_and_set(&g_hostModeResumePending, 0))
-        return;
-    if (!sessionIsOpen() || ksceUsbServMacGet(USB_HOST_PORT) == USB_HOST_MODE)
-        return;
-
-    result = ksceUsbServMacSelect(USB_HOST_PORT, USB_HOST_MODE);
-    if (result < 0) {
-        setUsbFailure(VITA_AUTO_USB_FAILURE_RESUME_HOST_MODE, result, 0);
-        return;
-    }
-    g_hostModeChanged = 1;
-    vitaUsbLogInfo("[VitaAutoUSB] Host mode restored after resume\n");
-}
 
 static int usbSysEventHandler(int resume, int eventid, void *args, void *opt)
 {
