@@ -147,6 +147,16 @@ bool drainReadsBeforeShutdown(
     return false;
 }
 
+__attribute__((noinline)) void logUsbFailure()
+{
+    vitaLog(
+        "direct-usb: usb failure stage=%d result=0x%08x count=%d",
+        vitaAutoUsbGetLastFailureStage(),
+        vitaAutoUsbGetLastFailureResult(),
+        vitaAutoUsbGetLastFailureCount()
+    );
+}
+
 int runDirectSession()
 {
     UsbTransport transport;
@@ -315,6 +325,7 @@ int runDirectSession()
 
         if (received < 0) {
             recordAppError(transport.lastAppError(), transport.lastError());
+            logUsbFailure();
             transport.logRxDiagnostics("transport-read-failed");
             break;
         }

@@ -1,5 +1,32 @@
 int _start(SceSize argc, const void *args) __attribute__((weak, alias("module_start")));
 
+static int usbSysEventHandler(int resume, int eventid, void *args, void *opt)
+{
+    (void)eventid;
+    (void)args;
+    (void)opt;
+    if (resume)
+        __sync_lock_test_and_set(&g_hostModeResumePending, 1);
+    return 0;
+}
+
+static void restoreHostModeAfterResume(void)
+{
+    int result;
+    if (!__sync_lock_test_and_set(&g_hostModeResumePending, 0))
+        return;
+    if (!sessionIsOpen() || ksceUsbServMacGet(USB_HOST_PORT) == USB_HOST_MODE)
+        return;
+
+    result = ksceUsbServMacSelect(USB_HOST_PORT, USB_HOST_MODE);
+    if (result < 0) {
+        setUsbFailure(VITA_AUTO_USB_FAILURE_RESUME_HOST_MODE, result, 0);
+        return;
+    }
+    g_hostModeChanged = 1;
+    vitaUsbLogInfo("[VitaAutoUSB] Host mode restored after resume\n");
+}
+
 int module_start(SceSize argc, const void *args)
 {
     int result;
@@ -20,6 +47,11 @@ int module_start(SceSize argc, const void *args)
     }
     resetSession();
     __sync_lock_test_and_set(&g_operationGate, USB_IO_CLOSED);
+    if (ksceKernelRegisterSysEventHandler(
+            "vita_auto_usb", usbSysEventHandler, NULL) >= 0)
+        g_sysEventRegistered = 1;
+    else
+        ksceDebugPrintf("[VitaAutoUSB] Resume handler not registered\n");
     return SCE_KERNEL_START_SUCCESS;
 }
 
@@ -30,6 +62,10 @@ int module_stop(SceSize argc, const void *args)
     (void)args;
     if (!__sync_bool_compare_and_swap(&g_lifecycleBusy, 0, 1))
         return SCE_KERNEL_STOP_FAIL;
+    if (g_sysEventRegistered) {
+        __sync_lock_release(&g_lifecycleBusy);
+        return SCE_KERNEL_STOP_FAIL;
+    }
 
     // Also exclude diagnostics and wake calls before deleting their resources.
     __sync_fetch_and_or(&g_operationGate, USB_ALL_CLOSED | USB_IO_CLOSED);
@@ -85,10 +121,12 @@ static int usbStart(void)
     g_driverRegistered = 1;
 
     g_accessoryActivateResult = ksceUsbServAccessoryActivate();
-    result = g_accessoryActivateResult;
-    if (result < 0)
-        goto failed;
-    g_accessoryActivated = 1;
+    if (g_accessoryActivateResult >= 0)
+        g_accessoryActivated = 1;
+    else
+        ksceDebugPrintf("[VitaAutoUSB] AccessoryActivate failed: 0x%08x\n",
+                        g_accessoryActivateResult);
+    g_hostModeResumePending = 0;
     if (g_previousHostMode != USB_HOST_MODE) {
         g_hostModeResult = ksceUsbServMacSelect(USB_HOST_PORT, USB_HOST_MODE);
         result = g_hostModeResult;
@@ -128,6 +166,7 @@ static int usbGetState(void)
     int state;
     if (!enterOperation(0))
         return g_retiredState;
+    restoreHostModeAfterResume();
     pumpAndroidAutoVersionHandshake();
     state = sessionIsOpen() ? g_usb.state : g_retiredState;
     leaveOperation();
