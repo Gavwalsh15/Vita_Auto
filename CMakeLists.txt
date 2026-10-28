@@ -46,9 +46,9 @@ add_executable(vita_auto
     src/main.cpp
 
     src/app/application.cpp
-    src/app/audio_settings.cpp
     src/app/connection_screen.cpp
     src/app/direct_session.cpp
+    src/app/settings.cpp
     src/app/usb_shell_lock.cpp
 
     src/android_auto/aa_direct.cpp
@@ -69,7 +69,10 @@ add_executable(vita_auto
 
     src/logger/vita_log.cpp
 
+    src/transport/transport.cpp
+    src/transport/auto_transport.cpp
     src/transport/usb_transport.cpp
+    src/transport/tcp_transport.cpp
     kernel/client/loader.c
 
     src/video/gxm_scaler.cpp
@@ -126,6 +129,8 @@ target_link_libraries(vita_auto PRIVATE
     SceAppMgr_stub
     SceCommonDialog_stub
     SceShellSvc_stub
+    SceNet_stub
+    SceNetCtl_stub
     m
 )
 

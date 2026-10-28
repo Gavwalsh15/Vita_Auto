@@ -23,6 +23,7 @@ constexpr uint8_t DIRECT_MICROPHONE_CHANNEL = 7;
 
 enum class DirectState {
     Stopped,
+    VersionNegotiating = 1, // Wi-Fi only
     TlsNegotiating = 3, // Preserve the existing state numbers in logs.
     TlsOk,
     ServiceReady,
@@ -70,6 +71,7 @@ public:
     // The native USB kernel transport has already completed AA version 1.7.
     // Begin directly at the TLS stage without sending VERSION_REQUEST twice.
     bool startAfterVersion();
+    bool start();
     bool feed(
         const uint8_t* data,
         size_t length,
@@ -106,6 +108,9 @@ public:
     uint32_t microphoneAcksReceived() const { return microphoneAcksReceived_; }
 
     void setMediaHandler(MediaHandler handler);
+    // Media frames the phone may send before waiting for an ACK. Set before
+    // start(); it is advertised in each AV setup response.
+    void setMediaMaxUnacked(uint32_t maxUnacked) { mediaMaxUnacked_ = maxUnacked > 0 ? maxUnacked : 1; }
 
     DirectState state() const { return state_; }
     int lastError() const { return static_cast<int>(lastError_); }
@@ -124,6 +129,7 @@ private:
     };
 
     bool queueFrame(std::vector<uint8_t> frame);
+    bool beginTls();
     bool flushTlsOutbound(uint8_t channel, uint8_t flags);
     bool sendPlainControl(uint16_t messageId, const std::vector<uint8_t>& payload);
     bool sendEncrypted(
@@ -174,6 +180,7 @@ private:
     uint64_t messageRxFirstCompletedAtUs_ = 0;
     uint64_t messageRxLastCompletedAtUs_ = 0;
     uint32_t mediaSessions_[16] = {};
+    uint32_t mediaMaxUnacked_ = 1;
     bool microphoneOpen_ = false;
     // Supplied by the phone's microphone request, independently of our sink limit.
     uint32_t microphoneMaxUnacked_ = 1;

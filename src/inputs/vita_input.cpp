@@ -5,7 +5,7 @@
 #include "inputs/vita_controller_input.h"
 #include "inputs/vita_touch_input.h"
 #include "logger/vita_log.h"
-#include "transport/usb_transport.h"
+#include "transport/transport.h"
 
 #include <psp2/kernel/threadmgr.h>
 
@@ -92,7 +92,7 @@ bool queueTouchEvent(const inputs::TouchEvent& touch)
     event.touch = touch;
     const bool queued = g_directInputQueue.push(event);
     if (queued)
-        UsbTransport::wake();
+        Transport::wake();
     return queued;
 }
 
@@ -107,7 +107,7 @@ bool queueButtonEvent(const inputs::ButtonEvent& button)
     event.button = button;
     const bool queued = g_directInputQueue.push(event);
     if (queued)
-        UsbTransport::wake();
+        Transport::wake();
     return queued;
 }
 

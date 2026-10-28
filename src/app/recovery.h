@@ -6,7 +6,7 @@ namespace app {
 
 enum class Recovery { ManualRetry, AutomaticRetry, RestartRequired };
 
-// Retry connection failures when cleanup has left USB ready for another attempt.
+// Retry connection failures when cleanup has left transport ready for another attempt.
 inline Recovery recoveryAfterSession(AppError error, bool cleanupComplete)
 {
     if (!cleanupComplete)
@@ -20,7 +20,11 @@ inline Recovery recoveryAfterSession(AppError error, bool cleanupComplete)
     case AppError::UsbSendRejected:
     case AppError::UsbWriteFailed:
     case AppError::UsbWriteTimedOut:
-    case AppError::UsbReadFailed: return Recovery::AutomaticRetry;
+    case AppError::UsbReadFailed:
+    case AppError::NetWriteFailed:
+    case AppError::NetWriteTimedOut:
+    case AppError::NetReadFailed:
+    case AppError::NetPeerClosed: return Recovery::AutomaticRetry;
     default: return Recovery::ManualRetry;
     }
 }

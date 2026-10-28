@@ -18,7 +18,7 @@ invariants, read [core-tasks.md](core-tasks.md).
 | `src/inputs` | Vita controls, touch, input events, and event queue |
 | `src/video` | H.264 parsing/decoding, frame ordering, and presentation |
 | `src/logger` | File logging and optional performance reporting |
-| `src/transport` | User-space USB transport used by the Android Auto session |
+| `src/transport` | `Transport` interface with USB and Wi-Fi implementations, and the Auto transport that waits for both |
 | `src/common` | Shared utilities |
 | `kernel` | Kernel USB plugin, user-mode bridge, exports, and loader |
 

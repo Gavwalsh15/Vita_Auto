@@ -16,7 +16,6 @@ the physical controls a comfortable alternative to the touchscreen.
 
 | Feature | What it would offer |
 | --- | --- |
-| Wireless Android Auto | A connection between the phone and Vita without the USB data cable. Feasibility on the Vita is still unconfirmed. |
 | Apple CarPlay | An option for iPhone users. This needs separate feasibility work before support can be promised. |
 | OLED display care | Explore image movement or dimming to reduce how long static content stays on screen. Effectiveness needs testing. |
 | PSP port | Explore whether the original PSP idea is feasible. hardware and USB support are major questions. |
