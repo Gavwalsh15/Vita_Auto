@@ -13,8 +13,14 @@ namespace audio {
 
 class Output {
 public:
-    Output(uint32_t sampleRate, uint8_t channels)
-        : sampleRate_(sampleRate), channels_(channels) {}
+    // bufferMs is the jitter buffer: playback starts once that much audio is
+    // queued and restarts after an underrun, so a network stall shorter than
+    // bufferMs is inaudible. The queue holds twice that before dropping.
+    Output(uint32_t sampleRate, uint8_t channels, uint32_t bufferMs)
+        : sampleRate_(sampleRate),
+          channels_(channels),
+          bufferMs_(bufferMs),
+          queue_(static_cast<size_t>(sampleRate) * channels * bufferMs * 2u / 1000u) {}
     ~Output();
 
     Output(const Output&) = delete;
@@ -30,10 +36,10 @@ public:
         return static_cast<app::AppError>(__atomic_load_n(&lastAppError_, __ATOMIC_ACQUIRE));
     }
     const char* lastErrorName() const { return app::appErrorName(lastAppError()); }
+    uint32_t underruns() const { return __atomic_load_n(&underruns_, __ATOMIC_ACQUIRE); }
 
 private:
     void setError(app::AppError error, int detail);
-    static constexpr size_t QUEUE_CAPACITY_SAMPLES = 9600;
 
     static int threadEntry(SceSize args, void* argp);
 
@@ -46,7 +52,10 @@ private:
     int port_ = -1;
     const uint32_t sampleRate_;
     const uint8_t channels_;
-    std::array<int16_t, QUEUE_CAPACITY_SAMPLES> queue_{};
+    const uint32_t bufferMs_;
+    std::vector<int16_t> queue_;
+    bool buffering_ = true;
+    uint32_t underruns_ = 0;
     size_t queueRead_ = 0;
     size_t queueWrite_ = 0;
     size_t queueSamples_ = 0;

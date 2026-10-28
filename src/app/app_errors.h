@@ -65,6 +65,15 @@ enum class AppError : int {
     ShellEventsInitFailed = 1801,
     ShellLockFailed = 1802,
     ShellUnlockFailed = 1803,
+
+    NetInitFailed = 1901,
+    NetNotConnected = 1902,
+    NetNoGateway = 1903,
+    NetSendRejected = 1904,
+    NetWriteFailed = 1905,
+    NetWriteTimedOut = 1906,
+    NetReadFailed = 1907,
+    NetPeerClosed = 1908,
 };
 
 inline const char* appErrorName(AppError error)
@@ -122,6 +131,14 @@ inline const char* appErrorName(AppError error)
     case AppError::ShellEventsInitFailed: return "ShellEventsInitFailed";
     case AppError::ShellLockFailed: return "ShellLockFailed";
     case AppError::ShellUnlockFailed: return "ShellUnlockFailed";
+    case AppError::NetInitFailed: return "NetInitFailed";
+    case AppError::NetNotConnected: return "NetNotConnected";
+    case AppError::NetNoGateway: return "NetNoGateway";
+    case AppError::NetSendRejected: return "NetSendRejected";
+    case AppError::NetWriteFailed: return "NetWriteFailed";
+    case AppError::NetWriteTimedOut: return "NetWriteTimedOut";
+    case AppError::NetReadFailed: return "NetReadFailed";
+    case AppError::NetPeerClosed: return "NetPeerClosed";
     }
     return "UnknownAppError";
 }

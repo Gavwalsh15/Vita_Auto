@@ -142,11 +142,11 @@ std::vector<uint8_t> statusOk()
     return out;
 }
 
-std::vector<uint8_t> avSetupOk()
+std::vector<uint8_t> avSetupOk(uint32_t maxUnacked)
 {
     std::vector<uint8_t> out;
     writeVarintField(out, 1, 2); // Config::STATUS_READY / head-unit sink.
-    writeVarintField(out, 2, 1); // Allow one unacknowledged media frame.
+    writeVarintField(out, 2, maxUnacked); // Media frames the phone may send ahead of our ACKs.
     writeVarintField(out, 3, 0); // Accept advertised configuration index 0.
     return out;
 }

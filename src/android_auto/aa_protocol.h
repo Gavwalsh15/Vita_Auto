@@ -13,7 +13,9 @@ constexpr uint8_t CONTROL_CHANNEL = 0;
 constexpr uint8_t PLAINTEXT_CONTROL_FLAGS = 0x03;
 constexpr uint8_t ENCRYPTED = 0x08;
 // Android Auto 1.7 as it is the lastest and easist by the looks
+constexpr uint16_t VERSION_REQUEST = 1;
 constexpr uint16_t VERSION_RESPONSE = 2;
+constexpr uint16_t VERSION_STATUS_MATCH = 0;
 constexpr uint16_t SSL_HANDSHAKE = 3;
 constexpr size_t HEADER_SIZE = 4;
 constexpr size_t MAX_FRAME_SIZE = UINT16_MAX;

@@ -16,20 +16,40 @@ constexpr uint32_t STOP_RETRY_DELAY_US = 50000;
 
 }
 
-bool UsbTransport::fail(app::AppError error, int detail)
+bool UsbTransport::pluginAvailable()
 {
-    if (lastAppError_ == app::AppError::None) {
-        lastAppError_ = error;
-        lastError_ = detail;
+    static int cached = -1;
+    if (cached < 0) {
+        // The bridge imports the plugin's exports, so it cannot load without it.
+        const int loadResult = vitaAutoUsbClientLoad(CLIENT_BRIDGE_PATH);
+        cached = loadResult >= 0 ? 1 : 0;
+        if (cached == 0)
+            vitaLog("direct-usb: USB plugin not available (0x%08x). Running wireless only",
+                    static_cast<unsigned>(loadResult));
     }
-    vitaLogAppError(error, detail);
-    return false;
+    return cached == 1;
 }
 
 bool UsbTransport::open(bool (*cancelled)())
 {
-    lastAppError_ = app::AppError::None;
-    lastError_ = 0;
+    if (!beginOpen(cancelled))
+        return false;
+    for (;;) {
+        const OpenPoll poll = pollOpen(cancelled);
+        if (poll == OpenPoll::Connected)
+            return true;
+        if (poll == OpenPoll::Failed)
+            return false;
+        sceKernelDelayThread(POLL_INTERVAL_US);
+    }
+}
+
+bool UsbTransport::beginOpen(bool (*cancelled)())
+{
+    clearError();
+    connectionDeadlineUs_ = 0;
+    lastState_ = -1;
+    lastVidPid_ = 0xffffffffu;
     if (cancelled())
         return false;
 
@@ -66,75 +86,72 @@ bool UsbTransport::open(bool (*cancelled)())
         vitaAutoUsbGetLastFailureResult(),
         vitaAutoUsbGetLastFailureCount()
     );
+    return true;
+}
 
-    uint64_t connectionDeadlineUs = 0;
-    int lastState = -1;
-    unsigned int lastVidPid = 0xffffffffu;
+OpenPoll UsbTransport::pollOpen(bool (*cancelled)())
+{
+    if (cancelled()) {
+        if (VITA_AUTO_VERBOSE_LOGGING && connectionDeadlineUs_ != 0)
+            logDiagnostics("open-cancelled");
+        return OpenPoll::Failed; // The owner still closes the session before exiting.
+    }
+    const uint64_t nowUs = sceKernelGetSystemTimeWide();
+    const int state = vitaAutoUsbGetState();
+    const unsigned int vidPid = vitaAutoUsbGetLastVidPid();
 
-    for (;;)
-    {
-        if (cancelled()) {
-            if (VITA_AUTO_VERBOSE_LOGGING && connectionDeadlineUs != 0)
-                logRxDiagnostics("open-cancelled");
-            return false; // The owner still closes the session before exiting.
-        }
-        const uint64_t nowUs = sceKernelGetSystemTimeWide();
-        const int state = vitaAutoUsbGetState();
-        const unsigned int vidPid = vitaAutoUsbGetLastVidPid();
+    // Waiting for a phone is unlimited. Once enumeration starts, retries
+    // within the handshake must not keep extending this attempt.
+    if (connectionDeadlineUs_ == 0 && state != VITA_AUTO_USB_IDLE)
+        connectionDeadlineUs_ = nowUs + OPEN_TIMEOUT_US;
 
-        // Waiting for a phone is unlimited. Once enumeration starts, retries
-        // within the handshake must not keep extending this attempt.
-        if (connectionDeadlineUs == 0 && state != VITA_AUTO_USB_IDLE)
-            connectionDeadlineUs = nowUs + OPEN_TIMEOUT_US;
-
-        if (state != lastState || vidPid != lastVidPid) {
-            vitaLogInfo(
-                "direct-usb: state=%d vidpid=0x%08x failure=%d/0x%08x/%d",
-                state,
-                vidPid,
-                vitaAutoUsbGetLastFailureStage(),
-                vitaAutoUsbGetLastFailureResult(),
-                vitaAutoUsbGetLastFailureCount()
-            );
-            if (VITA_AUTO_VERBOSE_LOGGING && state != VITA_AUTO_USB_IDLE &&
-                state < lastState)
-                logRxDiagnostics("handshake-retry");
-            lastState = state;
-            lastVidPid = vidPid;
-        }
-
-        if (state == VITA_AUTO_USB_AA_VERSION_COMPLETE)
-        {
-            connected_ = true;
-            return true;
-        }
-
-        if (state == VITA_AUTO_USB_FAILED) {
-            const bool stale = vitaAutoUsbGetLastFailureStage() ==
-                VITA_AUTO_USB_FAILURE_STALE_ACCESSORY;
-            fail(
-                stale ? app::AppError::UsbStaleAccessory
-                      : app::AppError::UsbEnumerationFailed,
-                vitaAutoUsbGetLastFailureResult()
-            );
-            logRxDiagnostics("open-failed");
-            return false;
-        }
-
-        if (connectionDeadlineUs != 0 && nowUs >= connectionDeadlineUs)
-            break;
-
-        sceKernelDelayThread(POLL_INTERVAL_US);
+    if (state != lastState_ || vidPid != lastVidPid_) {
+        vitaLogInfo(
+            "direct-usb: state=%d vidpid=0x%08x failure=%d/0x%08x/%d",
+            state,
+            vidPid,
+            vitaAutoUsbGetLastFailureStage(),
+            vitaAutoUsbGetLastFailureResult(),
+            vitaAutoUsbGetLastFailureCount()
+        );
+        if (VITA_AUTO_VERBOSE_LOGGING && state != VITA_AUTO_USB_IDLE &&
+            state < lastState_)
+            logDiagnostics("handshake-retry");
+        lastState_ = state;
+        lastVidPid_ = vidPid;
     }
 
-    vitaLog(
-        "direct-usb: timeout state=%d vidpid=0x%08x; no phone enumerated if vidpid is zero",
-        vitaAutoUsbGetState(),
-        vitaAutoUsbGetLastVidPid()
-    );
+    if (state == VITA_AUTO_USB_AA_VERSION_COMPLETE)
+    {
+        connected_ = true;
+        return OpenPoll::Connected;
+    }
 
-    logRxDiagnostics("open-timeout");
-    return fail(app::AppError::UsbConnectTimedOut);
+    if (state == VITA_AUTO_USB_FAILED) {
+        const bool stale = vitaAutoUsbGetLastFailureStage() ==
+            VITA_AUTO_USB_FAILURE_STALE_ACCESSORY;
+        fail(
+            stale ? app::AppError::UsbStaleAccessory
+                  : app::AppError::UsbEnumerationFailed,
+            vitaAutoUsbGetLastFailureResult()
+        );
+        logDiagnostics("open-failed");
+        return OpenPoll::Failed;
+    }
+
+    if (connectionDeadlineUs_ != 0 && nowUs >= connectionDeadlineUs_) {
+        vitaLog(
+            "direct-usb: timeout state=%d vidpid=0x%08x; no phone enumerated if vidpid is zero",
+            vitaAutoUsbGetState(),
+            vitaAutoUsbGetLastVidPid()
+        );
+
+        logDiagnostics("open-timeout");
+        fail(app::AppError::UsbConnectTimedOut);
+        return OpenPoll::Failed;
+    }
+
+    return OpenPoll::Waiting;
 }
 
 int UsbTransport::close()
@@ -151,6 +168,13 @@ int UsbTransport::close()
         result = vitaAutoUsbStop();
     }
     if (result < 0) {
+        vitaLog(
+            "direct-usb: stop failure stage=%d result=0x%08x count=%d",
+            vitaAutoUsbGetLastFailureStage(),
+            vitaAutoUsbGetLastFailureResult(),
+            vitaAutoUsbGetLastFailureCount()
+        );
+        logDiagnostics("usb-stop-failed");
         fail(app::AppError::UsbStopFailed, result);
         return result;
     }
@@ -221,6 +245,13 @@ int UsbTransport::receive(
     if (received < 0)
     {
         connected_ = false;
+        vitaLog(
+            "direct-usb: usb failure stage=%d result=0x%08x count=%d",
+            vitaAutoUsbGetLastFailureStage(),
+            vitaAutoUsbGetLastFailureResult(),
+            vitaAutoUsbGetLastFailureCount()
+        );
+        logDiagnostics("transport-read-failed");
         fail(app::AppError::UsbReadFailed, received);
         return -1;
     }
@@ -236,12 +267,28 @@ int UsbTransport::receive(
     return 1;
 }
 
-void UsbTransport::wake()
+void UsbTransport::wakeKernel()
 {
     vitaAutoUsbWake();
 }
 
-void UsbTransport::logRxDiagnostics(const char* reason) const
+int UsbTransport::beginShutdownDrain()
+{
+    return vitaAutoUsbDrainReads();
+}
+
+int UsbTransport::shutdownDrainState(TransportDrainState& state)
+{
+    VitaAutoUsbRxDiagnostics diagnostics{};
+    const int result = vitaAutoUsbGetRxDiagnostics(&diagnostics);
+    if (result < 0)
+        return result;
+    state.readsArmed = diagnostics.readArmed;
+    state.writeBusy = diagnostics.writeBusy != 0;
+    return 0;
+}
+
+void UsbTransport::logDiagnostics(const char* reason) const
 {
     VitaAutoUsbRxDiagnostics diagnostics{};
     const int result = vitaAutoUsbGetRxDiagnostics(&diagnostics);
