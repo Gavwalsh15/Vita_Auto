@@ -27,7 +27,18 @@ public:
     bool feed(const uint8_t* data, size_t length);
     // Writes are all-or-fail; the session ends if TLS cannot accept the batch.
     bool write(const uint8_t* data, size_t length);
+    // Returns >= 0 bytes, 0 for WANT_READ/WANT_WRITE, ReadRecoverable when a
+    // record failed authentication (the caller may resync), or -1 if fatal.
     int read(uint8_t* data, size_t capacity);
+    // Drops bytes the record layer has not consumed yet.
+    void discardInbound();
+    // Pins the inbound TLS 1.2 GCM sequence (AAD) to the sequence carried by
+    // the next record's explicit nonce. Used after a transport gap.
+    bool resyncToSequence(uint64_t sequence);
+    bool cipherIsGcm() const;
+    const char* cipherSuite() const;
+
+    enum : int { ReadRecoverable = -2 };
 
     const uint8_t* outboundData() const;
     size_t outboundSize() const;

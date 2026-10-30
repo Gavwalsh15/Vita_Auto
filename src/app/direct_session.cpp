@@ -55,6 +55,59 @@ void recordAppError(AppError error, int detail = 0)
     }
 }
 
+void watchUsbAfterFailure(uint32_t durationMs)
+{
+    vitaLog(
+        "direct-usb: post-failure watch start duration_ms=%u",
+        durationMs
+    );
+    int lastState = -1;
+    unsigned int lastVidPid = 0xffffffffu;
+    uint64_t lastFailure = ~static_cast<uint64_t>(0);
+    int lastHostMode = -1;
+    const uint64_t startedAtUs = sceKernelGetSystemTimeWide();
+    while (sceKernelGetSystemTimeWide() - startedAtUs <
+           static_cast<uint64_t>(durationMs) * 1000)
+    {
+        const int state = vitaAutoUsbGetState();
+        const unsigned int vidPid = vitaAutoUsbGetLastVidPid();
+        const int stage = vitaAutoUsbGetLastFailureStage();
+        const int result = vitaAutoUsbGetLastFailureResult();
+        const int count = vitaAutoUsbGetLastFailureCount();
+        const int hostMode = vitaAutoUsbGetCurrentHostMode();
+        VitaAutoUsbRxDiagnostics diagnostics{};
+        const int diagResult = vitaAutoUsbGetRxDiagnostics(&diagnostics);
+        const uint64_t failureKey =
+            (static_cast<uint64_t>(static_cast<uint32_t>(stage)) << 32) |
+            static_cast<uint32_t>(result);
+        if (state != lastState || vidPid != lastVidPid ||
+            failureKey != lastFailure || hostMode != lastHostMode)
+        {
+            vitaLog(
+                "direct-usb: post-failure state=%d vidpid=0x%08x hostmode=%d failure=%d/0x%08x/%d armed=%u",
+                state,
+                vidPid,
+                hostMode,
+                stage,
+                result,
+                count,
+                diagResult >= 0 ? diagnostics.readArmed : 0
+            );
+            lastState = state;
+            lastVidPid = vidPid;
+            lastFailure = failureKey;
+            lastHostMode = hostMode;
+        }
+        sceKernelDelayThread(100000);
+    }
+    vitaLog(
+        "direct-usb: post-failure watch end state=%d vidpid=0x%08x hostmode=%d",
+        vitaAutoUsbGetState(),
+        vitaAutoUsbGetLastVidPid(),
+        vitaAutoUsbGetCurrentHostMode()
+    );
+}
+
 bool closeTransport(UsbTransport& transport)
 {
     const int stopResult = transport.close();
@@ -145,16 +198,6 @@ bool drainReadsBeforeShutdown(
     vitaLog("direct-usb: RX drain incomplete armed=%u; Stop will retain pending requests",
             diagnostics.readArmed);
     return false;
-}
-
-__attribute__((noinline)) void logUsbFailure()
-{
-    vitaLog(
-        "direct-usb: usb failure stage=%d result=0x%08x count=%d",
-        vitaAutoUsbGetLastFailureStage(),
-        vitaAutoUsbGetLastFailureResult(),
-        vitaAutoUsbGetLastFailureCount()
-    );
 }
 
 int runDirectSession()
@@ -325,7 +368,6 @@ int runDirectSession()
 
         if (received < 0) {
             recordAppError(transport.lastAppError(), transport.lastError());
-            logUsbFailure();
             transport.logRxDiagnostics("transport-read-failed");
             break;
         }
@@ -364,6 +406,8 @@ int runDirectSession()
             lastState = state;
         }
 
+        transport.logHeartbeat(videoFrames);
+
         // A microphone request is delivered by session.feed(). Start/stop the
         // blocking capture worker before sleeping for more USB input.
         if (!syncMicrophoneCapture() || !drainMicrophoneFrames()) {
@@ -388,6 +432,13 @@ int runDirectSession()
     }
 
     inputs::setReady(false);
+    const AppError transportError = transport.lastAppError();
+    if (!stopRequested() &&
+        (transportError == AppError::UsbReadFailed ||
+         transportError == AppError::UsbWriteFailed))
+    {
+        watchUsbAfterFailure(10000);
+    }
     if (stopRequested() && transport.connected()) {
         const bool drained = drainReadsBeforeShutdown(transport, session);
         if (!drained && transport.lastAppError() != AppError::None)

@@ -14,7 +14,6 @@ const char* errorMessage(AppError error)
     case AppError::UsbBridgeLoadFailed: return "CHECK THE USB PLUGIN AND REBOOT";
     case AppError::UsbHostStartFailed: return "COULD NOT START THE USB PORT";
     case AppError::UsbEnumerationFailed: return "CHECK THE USB CABLE AND UNLOCK YOUR PHONE";
-    case AppError::UsbStaleAccessory: return "UNPLUG AND REPLUG YOUR PHONE, THEN RETRY";
     case AppError::UsbStopFailed: return "USB CLEANUP DID NOT COMPLETE";
     case AppError::ShellEventsInitFailed:
     case AppError::ShellLockFailed: return "COULD NOT PROTECT THE USB SESSION";

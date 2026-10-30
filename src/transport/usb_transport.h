@@ -39,6 +39,9 @@ public:
     static void wake();
 
     void logRxDiagnostics(const char* reason) const;
+    // Rate-limited liveness line: proves the IO loop is running even while no
+    // frames arrive, and shows how long the stream has been quiet.
+    void logHeartbeat(uint32_t videoFrames);
 
     bool connected() const;
     app::AppError lastAppError() const { return lastAppError_; }
@@ -50,4 +53,6 @@ private:
     int lastError_ = 0;
     bool connected_ = false;
     bool sessionStarted_ = false;
+    uint64_t lastRxAtUs_ = 0;
+    uint64_t nextHeartbeatUs_ = 0;
 };

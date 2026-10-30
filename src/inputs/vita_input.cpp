@@ -25,6 +25,18 @@ static SceUID g_directInputThread = -1;
 static volatile uint32_t g_directInputThreadRunning = 0;
 static volatile uint32_t g_directInputReady = 0;
 static DeliveryStats g_deliveryStats;
+// v2 diagnostic: one sequence number per delivered key/touch edge/rotary step.
+static uint32_t g_inputSequence = 0;
+
+const char* touchActionName(inputs::TouchAction action)
+{
+    switch (action) {
+    case inputs::TouchAction::Down: return "down";
+    case inputs::TouchAction::Up:   return "up";
+    case inputs::TouchAction::Move: return "move";
+    default:                        return "unknown";
+    }
+}
 
 android_auto::TouchAction toAndroidAutoTouchAction(inputs::TouchAction action)
 {
@@ -191,6 +203,7 @@ bool deliverDirectInputEvent(
     const inputs::InputEvent& event
 )
 {
+    uint32_t queueDelayUs = 0;
     if (event.queuedAtUs != 0) {
         const uint64_t nowUs = performance::nowUs();
         const uint64_t delayUs = nowUs > event.queuedAtUs
@@ -199,11 +212,13 @@ bool deliverDirectInputEvent(
         const uint32_t boundedDelay = delayUs > UINT32_MAX
             ? UINT32_MAX
             : static_cast<uint32_t>(delayUs);
+        queueDelayUs = boundedDelay;
         performance::record(performance::Metric::InputQueue, boundedDelay);
         if (boundedDelay > g_deliveryStats.maxQueueUs)
             g_deliveryStats.maxQueueUs = boundedDelay;
     }
 
+    const bool inputReady = session.inputReady();
     const uint64_t encodeStartUs = performance::nowUs();
     bool sent = false;
     if (event.type == inputs::InputEventType::Touch) {
@@ -217,6 +232,51 @@ bool deliverDirectInputEvent(
         sent = sendControllerEvent(session, event.button);
     }
     performance::record(performance::Metric::InputEncode, performance::elapsedUs(encodeStartUs));
+    const bool transmitted = inputReady && sent;
+
+    // Touch moves are coalesced and can be very frequent. Log the edges that
+    // produce an Android Auto action, plus every key/rotary report. A line is
+    // emitted even when the send fails or the input channel is not open yet,
+    // so a failed report is visible next to the USB detach.
+    if (event.type == inputs::InputEventType::Touch) {
+        if (event.touch.action != inputs::TouchAction::Move) {
+            ++g_inputSequence;
+            vitaLog(
+                "direct-usb: input seq=%u type=touch action=%s x=%u y=%u ready=%u tx=%u queue_us=%u",
+                g_inputSequence,
+                touchActionName(event.touch.action),
+                event.touch.x,
+                event.touch.y,
+                inputReady ? 1u : 0u,
+                transmitted ? 1u : 0u,
+                queueDelayUs
+            );
+        }
+    } else {
+        ++g_inputSequence;
+        if (isRotaryCommand(event.button.command)) {
+            vitaLog(
+                "direct-usb: input seq=%u type=rotary delta=%d ready=%u tx=%u queue_us=%u",
+                g_inputSequence,
+                event.button.command == inputs::ButtonCommand::PreviousItem ? -1 : 1,
+                inputReady ? 1u : 0u,
+                transmitted ? 1u : 0u,
+                queueDelayUs
+            );
+        } else {
+            vitaLog(
+                "direct-usb: input seq=%u type=button key=%u down=%u rep=%u ready=%u tx=%u queue_us=%u",
+                g_inputSequence,
+                androidKeycode(event.button.command),
+                event.button.pressed ? 1u : 0u,
+                event.button.repeated ? 1u : 0u,
+                inputReady ? 1u : 0u,
+                transmitted ? 1u : 0u,
+                queueDelayUs
+            );
+        }
+    }
+
     if (sent) {
         ++g_deliveryStats.delivered;
         if (event.type == inputs::InputEventType::Touch)
@@ -270,6 +330,7 @@ void init()
     initControllerInput();
     g_directInputQueue.reset();
     g_deliveryStats = {};
+    g_inputSequence = 0;
     setReady(false);
 }
 

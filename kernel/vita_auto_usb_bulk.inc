@@ -306,30 +306,8 @@ static void handleUsbTransferDone(int32_t result, int32_t count, void *arg)
     (void)arg;
 
     if (result < 0) {
-        const int gettingProtocol = g_usb.state == USB_GETTING_PROTOCOL;
-
-        ksceDebugPrintf(
-            "[VitaAutoUSB] USB request failed: 0x%08x state=%d attempt=%d\n",
-            result,
-            (int)g_usb.state,
-            g_protocolRetryCount
-        );
-        if (gettingProtocol &&
-            result == (int)SCE_USBD_ERROR_8024000A &&
-            g_protocolRetryCount < USB_PROTOCOL_MAX_RETRIES)
-        {
-            ++g_protocolRetryCount;
-            g_protocolSettlePolls = USB_PROTOCOL_RETRY_POLLS;
-            __sync_synchronize();
-            g_protocolRequestPending = 1;
-            return;
-        }
-        // For GET_PROTOCOL the count reports how many retries were spent
-        setUsbFailure(
-            VITA_AUTO_USB_FAILURE_CONTROL_TRANSFER,
-            result,
-            gettingProtocol ? g_protocolRetryCount : count
-        );
+        ksceDebugPrintf("[VitaAutoUSB] USB request failed: 0x%08x\n", result);
+        setUsbFailure(VITA_AUTO_USB_FAILURE_CONTROL_TRANSFER, result, count);
         return;
     }
 
@@ -420,13 +398,7 @@ static void handleAaBulkWriteDone(int32_t result, int32_t count, void *arg)
             result,
             count
         );
-        setUsbFailure(
-            g_staleAccessory && g_usb.state == USB_AA_VERSION_SENT
-                ? VITA_AUTO_USB_FAILURE_STALE_ACCESSORY
-                : VITA_AUTO_USB_FAILURE_BULK_WRITE,
-            result,
-            count
-        );
+        setUsbFailure(VITA_AUTO_USB_FAILURE_BULK_WRITE, result, count);
         return;
     }
 

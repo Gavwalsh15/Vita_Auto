@@ -18,7 +18,6 @@ enum class AppError : int {
     UsbWriteFailed = 1107,
     UsbWriteTimedOut = 1108,
     UsbReadFailed = 1109,
-    UsbStaleAccessory = 1110,
 
     AudioFormatUnsupported = 1201,
     AudioPortOpenFailed = 1202,
@@ -82,7 +81,6 @@ inline const char* appErrorName(AppError error)
     case AppError::UsbWriteFailed: return "UsbWriteFailed";
     case AppError::UsbWriteTimedOut: return "UsbWriteTimedOut";
     case AppError::UsbReadFailed: return "UsbReadFailed";
-    case AppError::UsbStaleAccessory: return "UsbStaleAccessory";
     case AppError::AudioFormatUnsupported: return "AudioFormatUnsupported";
     case AppError::AudioPortOpenFailed: return "AudioPortOpenFailed";
     case AppError::AudioMutexCreateFailed: return "AudioMutexCreateFailed";

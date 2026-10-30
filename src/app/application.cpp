@@ -74,7 +74,12 @@ int run()
                          !disconnectRequested && !exiting;
         if (restartAllowed && !retryPending)
             releaseHome();
-        vitaLogInfo("cleanup: complete restart_allowed=%u", restartAllowed ? 1u : 0u);
+        vitaLogInfo(
+            "cleanup: complete restart_allowed=%u auto_retry=%u error=%s",
+            restartAllowed ? 1u : 0u,
+            retryPending ? 1u : 0u,
+            appErrorName(lastError)
+        );
         retryAtUs = sceKernelGetSystemTimeWide() + RETRY_DELAY_US;
         nextScreenUs = 0;
     };

@@ -39,6 +39,7 @@ std::vector<uint8_t> encodeFrame(
 );
 
 uint16_t readBe16(const uint8_t* data);
+uint32_t readBe32(const uint8_t* data);
 void writeBe16(std::vector<uint8_t>& out, uint16_t value);
 
 class FrameParser {
@@ -54,6 +55,10 @@ public:
     const char* errorName() const { return frameParseErrorName(errorCode_); }
     size_t failureBufferedSize() const { return failureBufferedSize_; }
     const std::array<uint8_t, 16>& failureHead() const { return failureHead_; }
+    // A failed parser keeps its unparsed bytes so the caller can scan them for
+    // the next valid frame. Take them before reset().
+    std::vector<uint8_t> takeBuffer();
+    void reset();
 
 private:
     struct PlainFragment {

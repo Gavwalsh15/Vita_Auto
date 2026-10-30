@@ -20,13 +20,16 @@ uint32_t tlsPayloadHash(const std::vector<uint8_t>& data)
     return hash;
 }
 
-TlsRecordInspection inspectTlsRecords(const std::vector<uint8_t>& data)
+TlsRecordInspection inspectTlsRecords(const uint8_t* data, size_t length)
 {
     TlsRecordInspection result;
+    if (data == nullptr && length != 0)
+        return result;
+
     size_t offset = 0;
 
-    while (offset < data.size()) {
-        if (data.size() - offset < 5)
+    while (offset < length) {
+        if (length - offset < 5)
             return result;
 
         const uint8_t contentType = data[offset];
@@ -38,12 +41,12 @@ TlsRecordInspection inspectTlsRecords(const std::vector<uint8_t>& data)
             static_cast<size_t>(data[offset + 4]);
         if (contentType < 0x14 || contentType > 0x17 ||
             version != 0x0303 || recordLength < 8 ||
-            recordLength > data.size() - offset - 5)
+            recordLength > length - offset - 5)
         {
             return result;
         }
 
-        const uint64_t sequence = readBe64(data.data() + offset + 5);
+        const uint64_t sequence = readBe64(data + offset + 5);
         if (!result.hasSequence) {
             result.hasSequence = true;
             result.firstSequence = sequence;
@@ -55,8 +58,13 @@ TlsRecordInspection inspectTlsRecords(const std::vector<uint8_t>& data)
         offset += 5 + recordLength;
     }
 
-    result.layoutValid = offset == data.size() && result.recordCount != 0;
+    result.layoutValid = offset == length && result.recordCount != 0;
     return result;
+}
+
+TlsRecordInspection inspectTlsRecords(const std::vector<uint8_t>& data)
+{
+    return inspectTlsRecords(data.data(), data.size());
 }
 
 void writeBe64(uint8_t* out, uint64_t value)

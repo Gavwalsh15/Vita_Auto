@@ -13,20 +13,20 @@ constexpr uint8_t FRAME_LAST = 0x02;
 constexpr uint8_t FRAME_BULK = FRAME_FIRST | FRAME_LAST;
 constexpr size_t EXTENDED_HEADER_SIZE = 8;
 
-uint32_t readU32(const uint8_t* data)
-{
-    return (static_cast<uint32_t>(data[0]) << 24) |
-           (static_cast<uint32_t>(data[1]) << 16) |
-           (static_cast<uint32_t>(data[2]) << 8) |
-           static_cast<uint32_t>(data[3]);
-}
-
 }
 
 uint16_t readBe16(const uint8_t* data)
 {
     return (static_cast<uint16_t>(data[0]) << 8) |
            static_cast<uint16_t>(data[1]);
+}
+
+uint32_t readBe32(const uint8_t* data)
+{
+    return (static_cast<uint32_t>(data[0]) << 24) |
+           (static_cast<uint32_t>(data[1]) << 16) |
+           (static_cast<uint32_t>(data[2]) << 8) |
+           static_cast<uint32_t>(data[3]);
 }
 
 void writeBe16(std::vector<uint8_t>& output, uint16_t value)
@@ -43,7 +43,29 @@ void FrameParser::fail(FrameParseError errorCode)
     const size_t copySize = std::min(buffer_.size(), failureHead_.size());
     std::copy_n(buffer_.begin(), copySize, failureHead_.begin());
     failed_ = true;
+    // Keep buffer_ for the session's resync scanner. push() already refuses
+    // to append more data while failed_, so it cannot grow here.
+}
+
+std::vector<uint8_t> FrameParser::takeBuffer()
+{
+    std::vector<uint8_t> pending;
+    pending.swap(buffer_);
+    bufferRxFirstCompletedAtUs_ = 0;
+    bufferRxLastCompletedAtUs_ = 0;
+    return pending;
+}
+
+void FrameParser::reset()
+{
     buffer_.clear();
+    bufferRxFirstCompletedAtUs_ = 0;
+    bufferRxLastCompletedAtUs_ = 0;
+    fragments_ = {};
+    failed_ = false;
+    errorCode_ = FrameParseError::None;
+    failureBufferedSize_ = 0;
+    failureHead_.fill(0);
 }
 
 std::vector<uint8_t> encodeFrame(
@@ -113,7 +135,7 @@ std::vector<Frame> FrameParser::push(
 
         const uint16_t bodyLength = readBe16(buffer_.data() + 2);
         const uint32_t totalSize = frameType == FRAME_FIRST
-            ? readU32(buffer_.data() + 4)
+            ? readBe32(buffer_.data() + 4)
             : bodyLength;
         if (bodyLength == 0 ||
             (frameType == FRAME_FIRST &&
