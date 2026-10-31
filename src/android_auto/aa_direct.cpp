@@ -115,6 +115,7 @@ void DirectSession::reset()
         outbound_.reserve(64 * 1024);
     openedChannels_ = 0;
     std::memset(mediaSessions_, 0, sizeof(mediaSessions_));
+    std::memset(mediaSessionActive_, 0, sizeof(mediaSessionActive_));
     decryptedFragments_ = {};
     inboundTlsSequenceKnown_ = false;
     inboundTlsLastSequence_ = 0;
@@ -746,6 +747,24 @@ bool DirectSession::processFrame(const Frame& frame)
         if (read == TlsClient::ReadRecoverable) {
             ++resyncEvents_;
             resyncSkippedFrames_ = 0;
+            // The lost record never reaches processMedia, so acknowledge it
+            // here. Audio sinks advertise max_unacked=1; without this ACK the
+            // phone's permit for the dropped frame is never released and the
+            // stream can stall until resync completes.
+            if (frame.channel >= DIRECT_VIDEO_CHANNEL &&
+                frame.channel <= DIRECT_SYSTEM_AUDIO_CHANNEL &&
+                mediaSessionActive_[frame.channel])
+            {
+                const bool lossAckQueued = sendMediaAck(frame.channel, 1);
+                vitaLog(
+                    "aa-resync ack-loss channel=%u session=%u queued=%u",
+                    frame.channel,
+                    mediaSessions_[frame.channel],
+                    lossAckQueued ? 1u : 0u
+                );
+                if (!lossAckQueued)
+                    return false;
+            }
             // Records decrypted before the bad one are still valid; deliver
             // their plaintext before waiting for a new sequence anchor.
             const uint64_t plainRxFirst = pendingTlsRxFirstCompletedAtUs_;
@@ -1004,9 +1023,19 @@ bool DirectSession::processDecryptedMessage(
             1, // Field 1: media session id.
             0 // Missing session id falls back to 0.
         );
-        if (channel < 16)
+        if (channel < 16) {
             mediaSessions_[channel] = session;
+            if (mediaSink)
+                mediaSessionActive_[channel] = true;
+        }
         vitaLogInfo("direct-usb: media start channel=%u session=%u", channel, session);
+        return true;
+    }
+
+    if (mediaSink && messageId == AV_STOP_INDICATION) {
+        if (channel < 16)
+            mediaSessionActive_[channel] = false;
+        vitaLogInfo("direct-usb: media stop channel=%u", channel);
         return true;
     }
 

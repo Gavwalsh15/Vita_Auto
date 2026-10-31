@@ -186,6 +186,10 @@ private:
         const uint8_t* payload,
         size_t payloadSize
     );
+    // Acknowledge `count` media frames on an AV sink channel. Used for normal
+    // frames and for records dropped before decryption; the phone's flow
+    // control releases one permit per acknowledged frame.
+    bool sendMediaAck(uint8_t channel, uint32_t count);
 
     const bool audioOnVita_;
     DirectState state_ = DirectState::Stopped;
@@ -198,6 +202,7 @@ private:
     uint64_t messageRxFirstCompletedAtUs_ = 0;
     uint64_t messageRxLastCompletedAtUs_ = 0;
     uint32_t mediaSessions_[16] = {};
+    bool mediaSessionActive_[16] = {};
     uint32_t mediaMaxUnacked_ = 1;
     bool microphoneOpen_ = false;
     // Supplied by the phone's microphone request, independently of our sink limit.
