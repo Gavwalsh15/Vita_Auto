@@ -9,6 +9,14 @@ namespace {
 const char* errorMessage(AppError error)
 {
     switch (error) {
+    case AppError::NetInitFailed: return "COULD NOT START WI-FI NETWORKING";
+    case AppError::NetNotConnected: return "JOIN YOUR PHONE'S HOTSPOT IN VITA SETTINGS";
+    case AppError::NetNoGateway: return "COULD NOT FIND YOUR PHONE ON THE HOTSPOT";
+    case AppError::NetSendRejected:
+    case AppError::NetWriteFailed:
+    case AppError::NetWriteTimedOut:
+    case AppError::NetReadFailed:
+    case AppError::NetPeerClosed: return "WI-FI TO YOUR PHONE WAS LOST";
     case AppError::None: return "CONNECT YOUR PHONE WITH USB";
     case AppError::UsbConnectTimedOut: return "CONNECT YOUR PHONE WITH USB";
     case AppError::UsbBridgeLoadFailed: return "CHECK THE USB PLUGIN AND REBOOT";
@@ -37,24 +45,50 @@ const char* errorMessage(AppError error)
     }
 }
 
+const char* waitingDetail(ConnectionMode mode)
+{
+    switch (mode) {
+    case ConnectionMode::Usb: return "CONNECT YOUR PHONE WITH USB";
+    case ConnectionMode::Wireless: return "TURN ON YOUR HOTSPOT AND START HEADUNIT SERVER";
+    case ConnectionMode::Auto: break;
+    }
+    return "PLUG IN USB, OR START HEADUNIT SERVER FOR WI-FI";
+}
+
+const char* modeLabel(ConnectionMode mode)
+{
+    switch (mode) {
+    case ConnectionMode::Usb: return "USB ONLY";
+    case ConnectionMode::Wireless: return "WI-FI ONLY";
+    case ConnectionMode::Auto: break;
+    }
+    return "AUTO";
+}
+
 } // namespace
 
 void showConnectionScreen(ConnectionScreen screen, AppError error, unsigned retrySeconds,
-                          bool audioOnVita, bool audioSettingSaved)
+                          bool audioOnVita, bool settingsSaved, ConnectionMode mode,
+                          bool canChangeMode)
 {
     const char* title = "CONNECTION ERROR";
     const char* detail = errorMessage(error);
+    if (error == AppError::None || error == AppError::UsbConnectTimedOut)
+        detail = waitingDetail(mode);
     const char* action = "CROSS: RETRY    CIRCLE: EXIT";
     char code[96]{};
     char countdown[80]{};
     char audio[112]{};
     if (error != AppError::None)
         std::snprintf(code, sizeof(code), "ERROR %d: %s", static_cast<int>(error), appErrorName(error));
+    else
+        std::snprintf(code, sizeof(code), "CONNECTION: %s%s", modeLabel(mode),
+                      canChangeMode ? "    SQUARE: CHANGE" : "");
 
     switch (screen) {
     case ConnectionScreen::WaitingForPhone:
         title = "WAITING FOR PHONE";
-        detail = "CONNECT YOUR PHONE WITH USB";
+        detail = waitingDetail(mode);
         action = "START + SELECT: DISCONNECT    CIRCLE: EXIT";
         break;
     case ConnectionScreen::Connecting:
@@ -64,7 +98,8 @@ void showConnectionScreen(ConnectionScreen screen, AppError error, unsigned retr
         break;
     case ConnectionScreen::Disconnecting:
         title = "DISCONNECTING";
-        detail = "CLOSING ANDROID AUTO AND RELEASING USB";
+        detail = mode == ConnectionMode::Wireless ? "CLOSING ANDROID AUTO"
+                                                  : "CLOSING ANDROID AUTO AND RELEASING USB";
         action = "PLEASE WAIT";
         break;
     case ConnectionScreen::Retrying:
@@ -79,7 +114,8 @@ void showConnectionScreen(ConnectionScreen screen, AppError error, unsigned retr
         break;
     case ConnectionScreen::Disconnected:
         title = "DISCONNECTED";
-        detail = "USB RELEASED. YOU CAN PRESS HOME";
+        detail = mode == ConnectionMode::Wireless ? "DISCONNECTED. YOU CAN PRESS HOME"
+                                                  : "USB RELEASED. YOU CAN PRESS HOME";
         action = "CROSS: RECONNECT    CIRCLE: EXIT";
         break;
     case ConnectionScreen::Error:
@@ -92,7 +128,7 @@ void showConnectionScreen(ConnectionScreen screen, AppError error, unsigned retr
             ? "DISCONNECT TO CHANGE" : "";
     std::snprintf(audio, sizeof(audio), "MUSIC + NAV: %s    %s%s",
         audioOnVita ? "VITA" : "PHONE", audioHint,
-        audioSettingSaved ? "" : "    NOT SAVED");
+        settingsSaved ? "" : "    NOT SAVED");
     video::presenter::presentStatus(title, detail, code, action, audio);
 }
 

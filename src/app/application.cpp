@@ -1,11 +1,12 @@
 #include "app/application.h"
-#include "app/audio_settings.h"
 #include "app/config.h"
 #include "app/connection_screen.h"
 #include "app/direct_session.h"
 #include "app/recovery.h"
+#include "app/settings.h"
 #include "app/usb_shell_lock.h"
 #include "inputs/vita_input.h"
+#include "transport/usb_transport.h"
 #include "video/video_pipeline.h"
 #include "video/video_presenter.h"
 #include "logger/performance.h"
@@ -31,8 +32,17 @@ int run()
     bool restartAllowed = true;
     bool retryPending = false;
     bool disconnectRequested = false;
-    bool audioOnVita = loadAudioOnVita();
-    bool audioSettingSaved = true;
+    Settings settings = loadSettings();
+    bool settingsSaved = true;
+    const bool usbAvailable = UsbTransport::pluginAvailable();
+    auto activeSettings = [&]() {
+        Settings active = settings;
+        if (!usbAvailable)
+            active.connection = ConnectionMode::Wireless;
+        return active;
+    };
+    
+    bool modeSwitchPending = false;
     AppError lastError = AppError::None;
     AppError cleanupError = AppError::None;
     uint32_t previousButtons = 0;
@@ -72,6 +82,12 @@ int run()
         restartAllowed = recovery != Recovery::RestartRequired;
         retryPending = recovery == Recovery::AutomaticRetry &&
                          !disconnectRequested && !exiting;
+        const bool switchRestart = modeSwitchPending && restartAllowed && !exiting;
+        modeSwitchPending = false;
+        if (switchRestart) {
+            retryPending = true;
+            disconnectRequested = false;
+        }
         if (restartAllowed && !retryPending)
             releaseHome();
         vitaLogInfo(
@@ -80,7 +96,7 @@ int run()
             retryPending ? 1u : 0u,
             appErrorName(lastError)
         );
-        retryAtUs = sceKernelGetSystemTimeWide() + RETRY_DELAY_US;
+        retryAtUs = switchRestart ? 0 : sceKernelGetSystemTimeWide() + RETRY_DELAY_US;
         nextScreenUs = 0;
     };
 
@@ -101,7 +117,7 @@ int run()
         streaming = false;
         inputWorker = false;
         nextScreenUs = 0;
-        running = direct_session::start(audioOnVita);
+        running = direct_session::start(activeSettings());
         if (running)
             inputWorker = inputs::startWorker();
         else
@@ -150,10 +166,28 @@ int run()
                         releaseHome();
                     nextScreenUs = 0;
                 } else if (!running && restartAllowed && (pressed & SCE_CTRL_TRIANGLE)) {
-                    audioOnVita = !audioOnVita;
-                    audioSettingSaved = saveAudioOnVita(audioOnVita);
+                    settings.audioOnVita = !settings.audioOnVita;
+                    settingsSaved = saveSettings(settings);
                     retryPending = false;
                     releaseHome();
+                    nextScreenUs = 0;
+                } else if (usbAvailable && (pressed & SCE_CTRL_SQUARE) && !streaming &&
+                           !disconnectRequested &&
+                           (running ? !modeSwitchPending : restartAllowed)) {
+                            
+                    settings.connection = settings.connection == ConnectionMode::Auto
+                        ? ConnectionMode::Usb
+                        : settings.connection == ConnectionMode::Usb
+                            ? ConnectionMode::Wireless : ConnectionMode::Auto;
+                    settingsSaved = saveSettings(settings);
+                    if (running) {
+                        modeSwitchPending = true;
+                        direct_session::requestStop();
+                    } else {
+                        disconnectRequested = false;
+                        retryPending = true;
+                        retryAtUs = 0;
+                    }
                     nextScreenUs = 0;
                 } else if (!running && restartAllowed && (pressed & SCE_CTRL_CROSS)) {
                     disconnectRequested = false;
@@ -186,8 +220,10 @@ int run()
                 screen == ConnectionScreen::RestartRequired &&
                         cleanupError != AppError::None ? cleanupError : lastError,
                 seconds,
-                audioOnVita,
-                audioSettingSaved
+                settings.audioOnVita,
+                settingsSaved,
+                activeSettings().connection,
+                usbAvailable
             );
             nextScreenUs = nowUs + SCREEN_REFRESH_US;
         }

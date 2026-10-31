@@ -101,7 +101,7 @@ uint32_t readFirstVarintField(
 );
 
 std::vector<uint8_t> statusOk();
-std::vector<uint8_t> avSetupOk();
+std::vector<uint8_t> avSetupOk(uint32_t maxUnacked);
 std::vector<uint8_t> videoFocus(bool unsolicited = false);
 std::vector<uint8_t> audioFocus(const std::vector<uint8_t>& request);
 std::vector<uint8_t> sensorEvent(uint32_t sensorType);

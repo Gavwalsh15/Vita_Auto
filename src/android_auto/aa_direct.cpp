@@ -160,6 +160,18 @@ bool DirectSession::fail(DirectError error, int tlsError)
 bool DirectSession::startAfterVersion()
 {
     reset();
+    return beginTls();
+}
+
+bool DirectSession::start()
+{
+    reset();
+    state_ = DirectState::VersionNegotiating;
+    return sendPlainControl(VERSION_REQUEST, {0x00, 0x01, 0x00, 0x07});
+}
+
+bool DirectSession::beginTls()
+{
     tls_.reset(new TlsClient());
     if (!tls_ || !tls_->start()) {
         fail(DirectError::TlsStartFailed, tls_ ? tls_->lastError() : 0);
@@ -587,6 +599,20 @@ bool DirectSession::processFrame(const Frame& frame)
     if (!frame.encrypted) {
         if (frame.channel == CONTROL_CHANNEL &&
             frame.flags == PLAINTEXT_CONTROL_FLAGS &&
+            frame.messageId == VERSION_RESPONSE &&
+            state_ == DirectState::VersionNegotiating)
+        {
+            if (frame.payload.size() < 6 ||
+                readBe16(frame.payload.data() + 4) != VERSION_STATUS_MATCH)
+            {
+                vitaLog("direct-usb: phone rejected AA version request");
+                return fail(DirectError::VersionNegotiationFailed);
+            }
+            return beginTls();
+        }
+
+        if (frame.channel == CONTROL_CHANNEL &&
+            frame.flags == PLAINTEXT_CONTROL_FLAGS &&
             frame.messageId == VERSION_RESPONSE)
         {
             vitaLog("direct-usb: unexpected VERSION_RESPONSE after kernel version handshake");
@@ -955,10 +981,10 @@ bool DirectSession::processDecryptedMessage(
                 channel,
                 ENCRYPTED_SIGNAL_FLAGS,
                 AV_SETUP_RESPONSE,
-                avSetupOk()))
+                avSetupOk(mediaMaxUnacked_)))
             return false;
         if (channel == DIRECT_VIDEO_CHANNEL) {
-            vitaLogInfo("direct-usb: video setup max_unacked=1 focus=requested");
+            vitaLogInfo("direct-usb: video setup max_unacked=%u", mediaMaxUnacked_);
             state_ = DirectState::MediaReady;
             return sendEncrypted(
                 channel,

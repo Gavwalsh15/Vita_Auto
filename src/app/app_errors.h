@@ -18,6 +18,7 @@ enum class AppError : int {
     UsbWriteFailed = 1107,
     UsbWriteTimedOut = 1108,
     UsbReadFailed = 1109,
+    UsbStaleAccessory = 1110,
 
     AudioFormatUnsupported = 1201,
     AudioPortOpenFailed = 1202,
@@ -64,6 +65,15 @@ enum class AppError : int {
     ShellEventsInitFailed = 1801,
     ShellLockFailed = 1802,
     ShellUnlockFailed = 1803,
+
+    NetInitFailed = 1901,
+    NetNotConnected = 1902,
+    NetNoGateway = 1903,
+    NetSendRejected = 1904,
+    NetWriteFailed = 1905,
+    NetWriteTimedOut = 1906,
+    NetReadFailed = 1907,
+    NetPeerClosed = 1908,
 };
 
 inline const char* appErrorName(AppError error)
@@ -81,6 +91,7 @@ inline const char* appErrorName(AppError error)
     case AppError::UsbWriteFailed: return "UsbWriteFailed";
     case AppError::UsbWriteTimedOut: return "UsbWriteTimedOut";
     case AppError::UsbReadFailed: return "UsbReadFailed";
+    case AppError::UsbStaleAccessory: return "UsbStaleAccessory";
     case AppError::AudioFormatUnsupported: return "AudioFormatUnsupported";
     case AppError::AudioPortOpenFailed: return "AudioPortOpenFailed";
     case AppError::AudioMutexCreateFailed: return "AudioMutexCreateFailed";
@@ -120,6 +131,14 @@ inline const char* appErrorName(AppError error)
     case AppError::ShellEventsInitFailed: return "ShellEventsInitFailed";
     case AppError::ShellLockFailed: return "ShellLockFailed";
     case AppError::ShellUnlockFailed: return "ShellUnlockFailed";
+    case AppError::NetInitFailed: return "NetInitFailed";
+    case AppError::NetNotConnected: return "NetNotConnected";
+    case AppError::NetNoGateway: return "NetNoGateway";
+    case AppError::NetSendRejected: return "NetSendRejected";
+    case AppError::NetWriteFailed: return "NetWriteFailed";
+    case AppError::NetWriteTimedOut: return "NetWriteTimedOut";
+    case AppError::NetReadFailed: return "NetReadFailed";
+    case AppError::NetPeerClosed: return "NetPeerClosed";
     }
     return "UnknownAppError";
 }

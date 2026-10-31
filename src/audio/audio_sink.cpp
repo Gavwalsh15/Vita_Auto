@@ -65,16 +65,18 @@ void logStats(
 )
 {
     if (!VITA_AUTO_VERBOSE_LOGGING && stats.rejectedFrames == 0 &&
-        mediaOutput.lastError() == 0 && promptOutput.lastError() == 0)
+        mediaOutput.lastError() == 0 && promptOutput.lastError() == 0 &&
+        mediaOutput.underruns() == 0 && promptOutput.underruns() == 0)
         return;
     vitaLog(
-        "%s: audio media=%u/%lluB prompts=%u/%lluB rejected=%u errors=0x%08x (%s)/0x%08x (%s)",
+        "%s: audio media=%u/%lluB prompts=%u/%lluB rejected=%u underruns=%u/%u errors=0x%08x (%s)/0x%08x (%s)",
         prefix,
         stats.mediaFrames,
         static_cast<unsigned long long>(stats.mediaBytes),
         stats.promptFrames,
         static_cast<unsigned long long>(stats.promptBytes),
         stats.rejectedFrames,
+        mediaOutput.underruns(), promptOutput.underruns(),
         mediaOutput.lastError(), mediaOutput.lastErrorName(),
         promptOutput.lastError(), promptOutput.lastErrorName()
     );

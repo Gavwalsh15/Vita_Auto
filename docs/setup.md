@@ -73,6 +73,8 @@ from `app0:vita_auto_usb_client.suprx`.
 - **Circle** exits from a connection/error screen, including while waiting for USB.
 - **Start + Select** disconnects, including during streaming or while waiting for a phone.
 - On **Disconnected**, **Cross** reconnects and **Circle** exits.
+- **Square** cycles the connection: Auto (USB or Wi-Fi, whichever appears
+  first), USB only, Wi-Fi only (Headunit Server). 
 - **Triangle** changes **Music + Nav: Vita / Phone** while disconnected or on a retry/error
   screen. Press **Cross** to connect with that choice. Changing it pauses automatic retries.
 
@@ -82,9 +84,16 @@ then press **Triangle** and **Cross**. Music and navigation follow the same sett
 selected Bluetooth output. System sounds still use the Vita, and its microphone
 remains available in either mode.
 
-The audio choice is saved in `ux0:data/vita_auto/vita_auto_audio.txt`.
-The app creates this folder automatically and imports an existing audio setting
-from the old location.
+All settings live in one file, `ux0:data/vita_auto/vita_auto_settings.txt`. The
+app writes every option, with a short description of each at the top.
+```
+audio=vita
+connection=auto
+host=
+```
+
+`audio` is `vita` or `phone`. `connection` is `auto` (default: listen for USB
+and Wi-Fi together), `usb` or `wifi`. `host` is optional (see [wireless.md](wireless.md)).
 
 HOME is blocked while the app owns USB, including between automatic retries.
 To open LiveArea, press **Start + Select** and wait for **Disconnected** before
@@ -119,3 +128,5 @@ If the app reports a cleanup/restart error:
 
 - Reboot the Vita before trying another session.
 - If it repeats, look in `ux0:data/vita_auto/vita_auto.log`.
+
+For wireless setup, see [wireless.md](wireless.md).

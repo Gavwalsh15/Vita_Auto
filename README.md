@@ -38,6 +38,7 @@ Short version:
 - [Roadmap](docs/roadmap.md): current priorities and features under consideration.
 - [Setup and install](docs/setup.md): hardware, OTG/power notes, taiHEN config,
   release files, controls, logs, and bug report details.
+- [Wireless Android Auto (beta)](docs/wireless.md): Wi-Fi setup.
 - [Architecture](docs/architecture.md): source layout, USB bridge, app session,
   audio, input, video, logging, CI, and release flow.
 - [Core tasks and low-level architecture](docs/core-tasks.md): runtime task

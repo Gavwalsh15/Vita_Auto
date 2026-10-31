@@ -12,7 +12,6 @@ namespace audio {
 namespace {
 
 constexpr size_t AUDIO_GRAIN = 512;
-constexpr size_t AUDIO_QUEUE_MS = 80;
 constexpr int AUDIO_THREAD_PRIORITY = 0x10000100;
 constexpr int AUDIO_THREAD_STACK_SIZE = 0x10000;
 
@@ -126,7 +125,23 @@ bool Output::popFrame(std::vector<int16_t>& output)
 
     const size_t frameSamples = AUDIO_GRAIN * channels_;
 
+    const size_t targetSamples = std::max(
+        frameSamples,
+        (static_cast<size_t>(sampleRate_) * channels_ * bufferMs_) / 1000u
+    );
+
+    if (buffering_) {
+        if (queueSamples_ < targetSamples) {
+            sceKernelUnlockMutex(mutex_, 1);
+            return false;
+        }
+        buffering_ = false;
+    }
+
     if (queueSamples_ < frameSamples) {
+        // Ran dry: wait for the buffer to refill instead of stuttering.
+        buffering_ = true;
+        __atomic_add_fetch(&underruns_, 1u, __ATOMIC_RELEASE);
         sceKernelUnlockMutex(mutex_, 1);
         return false;
     }
@@ -178,10 +193,7 @@ bool Output::pushPcm16(const int16_t* samples, size_t sampleCount)
     if (!ensureWorker())
         return false;
 
-    const size_t queueLimit = std::min(
-        queue_.size(),
-        (static_cast<size_t>(sampleRate_) * channels_ * AUDIO_QUEUE_MS) / 1000u
-    );
+    const size_t queueLimit = queue_.size();
 
     sceKernelLockMutex(mutex_, 1, nullptr);
 
@@ -245,6 +257,7 @@ void Output::close()
     queueRead_ = 0;
     queueWrite_ = 0;
     queueSamples_ = 0;
+    buffering_ = true;
 }
 
 } // namespace audio

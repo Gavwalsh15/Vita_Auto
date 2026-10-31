@@ -8,13 +8,14 @@
 #include "audio/audio_output.h"
 #include "audio/microphone_input.h"
 #include "logger/vita_log.h"
-#include "transport/usb_transport.h"
 #include "vita_auto_usb.h"
+#include "transport/auto_transport.h"
+#include "transport/tcp_transport.h"
+#include "transport/usb_transport.h"
 
 #include <psp2/kernel/threadmgr.h>
 #include <algorithm>
-#include <vector>
-
+#include <cstdio>
 namespace app {
 namespace direct_session {
 namespace performance = logger::performance;
@@ -31,6 +32,8 @@ constexpr int DIRECT_USB_THREAD_STACK_SIZE = 0x40000;
 static SceUID g_directUsbThread = -1;
 // Set before the IO thread starts and kept fixed until it has joined.
 static bool g_audioOnVita = true;
+static ConnectionMode g_mode = ConnectionMode::Auto;
+static char g_host[40] = {};
 static volatile uint32_t g_directIoFinished = 0;
 static volatile int g_directIoError = static_cast<int>(AppError::None);
 static volatile int g_directIoErrorDetail = 0;
@@ -108,26 +111,18 @@ void watchUsbAfterFailure(uint32_t durationMs)
     );
 }
 
-bool closeTransport(UsbTransport& transport)
+bool closeTransport(Transport& transport)
 {
     const int stopResult = transport.close();
     const bool stopped = stopResult >= 0;
     __atomic_store_n(&g_canRestart, stopped ? 1u : 0u, __ATOMIC_RELEASE);
-    if (!stopped) {
-        vitaLog(
-            "direct-usb: stop failure stage=%d result=0x%08x count=%d",
-            vitaAutoUsbGetLastFailureStage(),
-            vitaAutoUsbGetLastFailureResult(),
-            vitaAutoUsbGetLastFailureCount()
-        );
-        transport.logRxDiagnostics("usb-stop-failed");
+    if (!stopped)
         recordAppError(AppError::UsbStopFailed, stopResult);
-    }
     return stopped;
 }
 
 bool flushDirectSessionOutbound(
-    UsbTransport& transport,
+    Transport& transport,
     android_auto::DirectSession& session
 )
 {
@@ -142,7 +137,7 @@ bool flushDirectSessionOutbound(
     size_t offset = 0;
     while (offset < wireSize) {
         const size_t count = std::min(
-            UsbTransport::MAX_TRANSFER_SIZE,
+            Transport::MAX_TRANSFER_SIZE,
             wireSize - offset
         );
         if (!transport.send(wire + offset, count)) {
@@ -160,11 +155,11 @@ bool flushDirectSessionOutbound(
 }
 
 bool drainReadsBeforeShutdown(
-    UsbTransport& transport,
+    Transport& transport,
     android_auto::DirectSession& session
 )
 {
-    const int result = vitaAutoUsbDrainReads();
+    const int result = transport.beginShutdownDrain();
     if (result < 0) {
         vitaLog("direct-usb: could not begin RX drain err=0x%08x", result);
         return false;
@@ -174,11 +169,11 @@ bool drainReadsBeforeShutdown(
         sceKernelGetSystemTimeWide() + SHUTDOWN_DRAIN_TIMEOUT_US;
     uint64_t nextPingUs = 0;
     std::vector<uint8_t> discarded;
-    VitaAutoUsbRxDiagnostics diagnostics{};
+    TransportDrainState diagnostics{};
     while (sceKernelGetSystemTimeWide() < deadlineUs) {
-        if (vitaAutoUsbGetRxDiagnostics(&diagnostics) < 0)
+        if (transport.shutdownDrainState(diagnostics) < 0)
             break;
-        if (diagnostics.readArmed == 0) {
+        if (diagnostics.readsArmed == 0) {
             vitaLogInfo("direct-usb: RX drained before shutdown");
             return true;
         }
@@ -196,24 +191,36 @@ bool drainReadsBeforeShutdown(
             break;
     }
     vitaLog("direct-usb: RX drain incomplete armed=%u; Stop will retain pending requests",
-            diagnostics.readArmed);
+            diagnostics.readsArmed);
     return false;
 }
 
 int runDirectSession()
 {
-    UsbTransport transport;
+    std::unique_ptr<Transport> transportOwner;
+    switch (g_mode) {
+    case ConnectionMode::Wireless:
+    case ConnectionMode::Auto: {
+        AutoTransport::Options options;
+        options.wifiHostOverride = g_host;
+        options.usb = g_mode == ConnectionMode::Auto;
+        transportOwner.reset(new AutoTransport(options));
+        break;
+    }
+    case ConnectionMode::Usb:
+        transportOwner.reset(new UsbTransport());
+        break;
+    }
+    Transport& transport = *transportOwner;
+    vitaLog("session: connection=%s", connectionModeName(g_mode));
     android_auto::DirectSession session(g_audioOnVita);
-    audio::Output mediaAudioOutput(48000, 2);
-    // share the same advertised 16 kHz mono format.
-    audio::Output promptAudioOutput(16000, 1);
-    audio::MicrophoneInput microphoneInput(&UsbTransport::wake);
+    audio::MicrophoneInput microphoneInput(&Transport::wake);
     audio::sink::AudioSinkStats audioStats{};
     uint32_t videoSequence = 0;
     uint32_t videoFrames = 0;
     performance::Reporter perfReporter{};
     std::vector<uint8_t> packet;
-    packet.reserve(UsbTransport::MAX_TRANSFER_SIZE);
+    packet.reserve(Transport::MAX_TRANSFER_SIZE);
 
     if (!transport.open(&stopRequested)) {
         recordAppError(transport.lastAppError(), transport.lastError());
@@ -229,6 +236,14 @@ int runDirectSession()
         return lastError() == AppError::None ? 0 : 1;
     }
 
+    // USB keeps the proven 80 ms queue. Wi-Fi uses a deeper buffer to ride out
+    // 100-200 ms stalls; music and navigation prompts are not latency sensitive.
+    const uint32_t mediaBufferMs = transport.wireless() ? 400 : 80;
+    const uint32_t promptBufferMs = transport.wireless() ? 250 : 80;
+    audio::Output mediaAudioOutput(48000, 2, mediaBufferMs);
+    audio::Output promptAudioOutput(16000, 1, promptBufferMs);
+
+    session.setMediaMaxUnacked(transport.mediaMaxUnacked());
     session.setMediaHandler(
         [&](const android_auto::MediaFrame& frame) {
             if (audio::sink::acceptFrame(
@@ -248,7 +263,8 @@ int runDirectSession()
         }
     );
 
-    const bool sessionStarted = session.startAfterVersion();
+    const bool sessionStarted = transport.versionNegotiated()
+        ? session.startAfterVersion() : session.start();
     if (!sessionStarted ||
         !flushDirectSessionOutbound(transport, session))
     {
@@ -368,7 +384,6 @@ int runDirectSession()
 
         if (received < 0) {
             recordAppError(transport.lastAppError(), transport.lastError());
-            transport.logRxDiagnostics("transport-read-failed");
             break;
         }
 
@@ -396,7 +411,7 @@ int runDirectSession()
                 session.lastErrorName(),
                 session.lastTlsError()
             );
-            transport.logRxDiagnostics("session-feed-failed");
+            transport.logDiagnostics("session-feed-failed");
             break;
         }
 
@@ -425,7 +440,7 @@ int runDirectSession()
 
         if (VITA_AUTO_PERFORMANCE &&
             perfReporter.report(videoFrames, session))
-            transport.logRxDiagnostics("perf-ack");
+            transport.logDiagnostics("perf-ack");
 
         // receive() sleeps on the kernel RX/input event. No user-space poll
         // delay is needed here.
@@ -454,7 +469,7 @@ int runDirectSession()
     if (VITA_AUTO_PERFORMANCE &&
         perfReporter.report(videoFrames, session, true))
     {
-        transport.logRxDiagnostics("perf-final");
+        transport.logDiagnostics("perf-final");
     }
 #if VITA_AUTO_VERBOSE_LOGGING
     const inputs::DeliveryStats inputStats = inputs::deliveryStats();
@@ -498,7 +513,7 @@ int runDirectSession()
     mediaAudioOutput.close();
     promptAudioOutput.close();
     if (VITA_AUTO_VERBOSE_LOGGING || lastError() != AppError::None || session.lastError() != 0)
-        transport.logRxDiagnostics("session-ended");
+        transport.logDiagnostics("session-ended");
     closeTransport(transport);
     const int result = lastError() == AppError::None ? 0 : 1;
     if (VITA_AUTO_VERBOSE_LOGGING || result != 0)
@@ -519,11 +534,15 @@ int directUsbThreadEntry(SceSize, void*)
 
 } // namespace
 
-bool start(bool audioOnVita)
+bool start(const Settings& settings)
 {
     if (g_directUsbThread >= 0 || !canRestart())
         return false;
-    g_audioOnVita = audioOnVita;
+    const ConnectionMode mode = settings.connection;
+    g_audioOnVita = settings.audioOnVita;
+    g_mode = mode;
+    std::snprintf(g_host, sizeof(g_host), "%s", settings.host);
+    Transport::setWakeHandler(mode == ConnectionMode::Usb ? &UsbTransport::wakeKernel : nullptr);
     __atomic_store_n(&g_stopRequested, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_status, static_cast<int>(Status::WaitingForPhone), __ATOMIC_RELEASE);
     __atomic_store_n(&g_directIoError, static_cast<int>(AppError::None), __ATOMIC_RELEASE);
