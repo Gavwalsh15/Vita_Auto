@@ -27,6 +27,10 @@ public:
     int shutdownDrainState(TransportDrainState& state) override;
     void logDiagnostics(const char* reason) const override;
 
+    // Rate-limited liveness line: proves the IO loop is running even while no
+    // frames arrive, and shows how long the stream has been quiet.
+    void logHeartbeat(uint32_t videoFrames) override;
+
     static void wakeKernel();
 
 private:
@@ -35,4 +39,6 @@ private:
     uint64_t connectionDeadlineUs_ = 0;
     int lastState_ = -1;
     unsigned int lastVidPid_ = 0xffffffffu;
+    uint64_t lastRxAtUs_ = 0;
+    uint64_t nextHeartbeatUs_ = 0;
 };

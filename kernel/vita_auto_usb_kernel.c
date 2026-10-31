@@ -9,7 +9,6 @@
 #include <psp2kern/kernel/debug.h>
 #include <psp2kern/kernel/cpu.h>
 #include <psp2kern/kernel/modulemgr.h>
-#include <psp2kern/kernel/suspend.h>
 #include <psp2kern/kernel/sysmem.h>
 #include <psp2kern/kernel/threadmgr.h>
 #include <psp2kern/usbd.h>
@@ -49,9 +48,6 @@ Diagnostics/wake remain available after Stop, until module unload begins. */
 #define AA_VERSION_MAX_RETRIES    8
 #define AA_VERSION_RETRY_POLLS    10
 #define AA_CONFIG_SETTLE_POLLS    3
-#define USB_PROTOCOL_MAX_RETRIES  6
-#define USB_PROTOCOL_SETTLE_POLLS 3
-#define USB_PROTOCOL_RETRY_POLLS  5
 /*
  Vita's host controller reliably completes endpoint-sized bulk reads. AA
  and TLS are byte streams, so larger records are reassembled above this
@@ -200,10 +196,6 @@ static volatile int g_waitingForAccessory;
 static volatile int g_versionSettlePolls;
 static volatile int g_versionWriteCompleted;
 static volatile int g_versionRetryCount;
-static volatile int g_protocolRequestPending;
-static volatile int g_protocolSettlePolls;
-static volatile int g_protocolRetryCount;
-static volatile int g_staleAccessory;
 static volatile int g_accessoryConfigPending;
 static volatile int g_accessoryConfigured;
 static SceUID g_accessoryControlPipe = -1;
@@ -215,8 +207,6 @@ static int g_driverRegistered;
 static int g_accessoryActivated;
 static int g_hostModeChanged;
 static int g_previousHostMode = USB_DEVICE_MODE;
-static volatile int g_hostModeResumePending;
-static int g_sysEventRegistered;
 
 static int sessionIsOpen(void)
 {

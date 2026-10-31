@@ -1,3 +1,4 @@
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS
 #include "android_auto/aa_tls.h"
 
 // Needed for handshake
@@ -21,6 +22,16 @@ namespace {
 
 constexpr char PERSONALIZATION[] = "vita-auto-aa";
 constexpr size_t MAX_TLS_BUFFER = 64 * 1024;
+
+// A corrupted USB read can make a record fail authentication. mbedTLS has
+// already consumed that record when it returns one of these, and the stream
+// may be resynchronised from the AA frame layer.
+bool recoverableRecordError(int error)
+{
+    return error == MBEDTLS_ERR_SSL_INVALID_MAC ||
+           error == MBEDTLS_ERR_SSL_INVALID_RECORD ||
+           error == MBEDTLS_ERR_SSL_DECODE_ERROR;
+}
 
 }
 
@@ -236,15 +247,67 @@ int TlsClient::read(uint8_t* data, size_t capacity)
         return -1;
     }
 
+    // mbedTLS 3.6 queues a fatal bad_record_mac alert (and advances the
+    // outbound sequence) before returning INVALID_MAC. The phone must not see
+    // that alert, and it must not see a gap in our record sequence.
+    unsigned char savedOutCtr[MBEDTLS_SSL_SEQUENCE_NUMBER_LEN];
+    std::memcpy(savedOutCtr, ssl_->cur_out_ctr, sizeof(savedOutCtr));
+    const size_t outboundBefore = outbound_.size();
+
     const int result = mbedtls_ssl_read(ssl_, data, capacity);
 
     if (result == MBEDTLS_ERR_SSL_WANT_READ || result == MBEDTLS_ERR_SSL_WANT_WRITE)
         return 0;
     if (result < 0) {
+        if (recoverableRecordError(result) && cipherIsGcm()) {
+            if (outbound_.size() > outboundBefore)
+                outbound_.resize(outboundBefore);
+            std::memcpy(ssl_->cur_out_ctr, savedOutCtr, sizeof(savedOutCtr));
+            ssl_->send_alert = 0;
+            ssl_->out_left = 0;
+            ssl_->in_left = 0;
+            inbound_.clear();
+            inboundOffset_ = 0;
+            lastError_ = result;
+            return ReadRecoverable;
+        }
         fail(result);
         return -1;
     }
     return result;
+}
+
+void TlsClient::discardInbound()
+{
+    inbound_.clear();
+    inboundOffset_ = 0;
+    if (ssl_ != nullptr)
+        ssl_->in_left = 0;
+}
+
+bool TlsClient::cipherIsGcm() const
+{
+    const char* const suite = cipherSuite();
+    return suite != nullptr && std::strstr(suite, "GCM") != nullptr;
+}
+
+const char* TlsClient::cipherSuite() const
+{
+    return ssl_ != nullptr ? mbedtls_ssl_get_ciphersuite(ssl_) : nullptr;
+}
+
+bool TlsClient::resyncToSequence(uint64_t sequence)
+{
+    if (ssl_ == nullptr || !secure_ || !cipherIsGcm() || ssl_->in_ctr == nullptr)
+        return false;
+
+    discardInbound();
+    for (unsigned index = 0; index < MBEDTLS_SSL_SEQUENCE_NUMBER_LEN; ++index) {
+        ssl_->in_ctr[index] = static_cast<unsigned char>(
+            (sequence >> ((MBEDTLS_SSL_SEQUENCE_NUMBER_LEN - 1u - index) * 8u)) & 0xffu
+        );
+    }
+    return true;
 }
 
 const uint8_t* TlsClient::outboundData() const

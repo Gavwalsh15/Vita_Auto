@@ -3,6 +3,7 @@
 
 #include <psp2/io/fcntl.h>
 #include <psp2/io/stat.h>
+#include <psp2/kernel/threadmgr.h>
 
 #include <cstdarg>
 #include <cstdio>
@@ -29,14 +30,29 @@ void writeLogLine(const char* text, bool reset)
     if (g_logFile < 0)
         return;
 
-    char output[258];
+    char output[300];
+    const SceInt64 nowUs = sceKernelGetSystemTimeWide();
+    const int prefixLength = std::snprintf(
+        output,
+        sizeof(output),
+        "[%8lld.%03lld] ",
+        static_cast<long long>(nowUs / 1000000),
+        static_cast<long long>((nowUs / 1000) % 1000)
+    );
+    const size_t prefix = prefixLength > 0
+        ? static_cast<size_t>(prefixLength)
+        : 0;
     const size_t length = std::strlen(text);
-    const size_t copyLength = length < sizeof(output) - 2
+    const size_t copyLength = length < sizeof(output) - prefix - 2
         ? length
-        : sizeof(output) - 2;
-    std::memcpy(output, text, copyLength);
-    output[copyLength] = '\n';
-    sceIoWrite(g_logFile, output, static_cast<SceSize>(copyLength + 1));
+        : sizeof(output) - prefix - 2;
+    std::memcpy(output + prefix, text, copyLength);
+    output[prefix + copyLength] = '\n';
+    sceIoWrite(
+        g_logFile,
+        output,
+        static_cast<SceSize>(prefix + copyLength + 1)
+    );
 }
 
 }

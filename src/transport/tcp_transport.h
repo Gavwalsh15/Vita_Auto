@@ -25,6 +25,7 @@ public:
     void logDiagnostics(const char* reason) const override;
     // Wi-Fi round trips are 5-50 ms.
     uint32_t mediaMaxUnacked() const override { return 3; }
+    bool wireless() const override { return true; }
 
 private:
     bool initNetwork();

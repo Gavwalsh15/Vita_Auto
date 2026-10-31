@@ -28,6 +28,10 @@ public:
     {
         return active_ != nullptr && active_->versionNegotiated();
     }
+    bool wireless() const override
+    {
+        return active_ != nullptr && active_->wireless();
+    }
 
     int beginShutdownDrain() override
     {

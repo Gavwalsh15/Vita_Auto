@@ -1,8 +1,6 @@
 [submodule "third_party/mbedtls"]
 	path = third_party/mbedtls
 	url = https://github.com/Mbed-TLS/mbedtls.git
-	# The build applies patches/mbedtls-x509-legacy-timezone.patch in place.
-	ignore = dirty
 [submodule "third_party/libvita2d"]
 	path = third_party/libvita2d
 	url = https://github.com/xerpi/libvita2d.git

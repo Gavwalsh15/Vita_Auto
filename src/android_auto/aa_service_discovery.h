@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <vector>
 
+// Current Android Auto VideoResolution enum: NONE=0, _480p=1, _720p=2.
+#define AA_VIDEO_RESOLUTION_480P 1
 #define AA_VIDEO_RESOLUTION_720P 2
 // Current Android Auto VideoFPS enum: NONE=0, _60=1, _30=2.
 #define AA_VIDEO_FRAME_RATE_30_FPS 2
@@ -12,6 +14,7 @@ namespace android_auto {
 inline std::vector<uint8_t> serviceDiscoveryResponse(bool audioOnVita)
 {
     // Input, sensors, then 1280x720 H.264 at 30 fps (channels 1-3).
+    // AVCDEC scales the 720p stream into the Vita 960x544 output buffer.
     static constexpr uint8_t inputSensorsVideo[] = {
         0x0a, 0x26, 0x08, 0x01, 0x22, 0x22, 0x08, 0x03, 0x08, 0x04, 0x08, 0x54,
         0x08, 0x17, 0x08, 0x13, 0x08, 0x14, 0x08, 0x15, 0x08, 0x16, 0x08, 0x58,

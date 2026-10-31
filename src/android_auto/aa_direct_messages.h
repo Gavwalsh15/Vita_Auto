@@ -17,6 +17,8 @@ struct TlsRecordInspection {
 };
 
 uint32_t tlsPayloadHash(const std::vector<uint8_t>& data);
+uint64_t readBe64(const uint8_t* data);
+TlsRecordInspection inspectTlsRecords(const uint8_t* data, size_t length);
 TlsRecordInspection inspectTlsRecords(const std::vector<uint8_t>& data);
 
 void writeBe64(uint8_t* out, uint64_t value);

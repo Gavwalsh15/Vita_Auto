@@ -16,6 +16,36 @@ constexpr size_t MEDIA_TIMESTAMP_SIZE = 8;
 
 } // namespace
 
+bool DirectSession::sendMediaAck(uint8_t channel, uint32_t count)
+{
+    // ack_count must be > 0 or the phone ignores the acknowledgement.
+    if (channel >= 16 || count == 0)
+        return false;
+
+    FixedWriter<16> ack;
+    const bool queued = ack.varintField(
+        1,
+        mediaSessions_[channel]
+    ) && ack.varintField(2, count) && sendEncryptedRaw(
+        channel,
+        ENCRYPTED_SIGNAL_FLAGS,
+        AV_MEDIA_ACK,
+        ack.data(),
+        ack.size()
+    );
+
+#if VITA_AUTO_PERFORMANCE
+    if (queued) {
+        const uint64_t nowUs = sceKernelGetSystemTimeWide();
+        if (mediaAcksPending_ == 0)
+            mediaAckOldestPendingUs_ = nowUs;
+        ++mediaAcksQueued_;
+        ++mediaAcksPending_;
+    }
+#endif
+    return queued;
+}
+
 bool DirectSession::processMedia(
     uint8_t channel,
     uint16_t messageId,
@@ -47,28 +77,7 @@ bool DirectSession::processMedia(
         mediaHandler_(frame);
     }
 
-    FixedWriter<16> ack;
-    const bool queued = ack.varintField(
-        1,
-        channel < 16 ? mediaSessions_[channel] : 0
-    ) && ack.varintField(2, 1) && sendEncryptedRaw(
-        channel,
-        ENCRYPTED_SIGNAL_FLAGS,
-        AV_MEDIA_ACK,
-        ack.data(),
-        ack.size()
-    );
-
-#if VITA_AUTO_PERFORMANCE
-    if (queued) {
-        const uint64_t nowUs = sceKernelGetSystemTimeWide();
-        if (mediaAcksPending_ == 0)
-            mediaAckOldestPendingUs_ = nowUs;
-        ++mediaAcksQueued_;
-        ++mediaAcksPending_;
-    }
-#endif
-    return queued;
+    return sendMediaAck(channel, 1);
 }
 
 } // namespace android_auto

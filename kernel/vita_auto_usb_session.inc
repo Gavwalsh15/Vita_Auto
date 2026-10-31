@@ -163,34 +163,6 @@ static int startAndroidAutoVersionHandshake(int deviceId)
 
 static void pumpAndroidAutoVersionHandshake(void)
 {
-    if (g_usb.state == USB_GETTING_PROTOCOL && g_protocolRequestPending) {
-        int submitResult;
-
-        if (g_protocolSettlePolls > 0) {
-            --g_protocolSettlePolls;
-            return;
-        }
-        if (g_usb.controlPipe < 0)
-            return;
-
-        g_protocolRequestPending = 0;
-        submitResult = submitControlRequest(
-            USB_REQ_TO_HOST_VENDOR,
-            USB_GET_PROTOCOL,
-            0,
-            0,
-            sizeof(g_usb.protocol),
-            g_usb.protocol
-        );
-        if (submitResult < 0)
-            setUsbFailure(
-                VITA_AUTO_USB_FAILURE_PROTOCOL_SUBMIT,
-                submitResult,
-                g_protocolRetryCount
-            );
-        return;
-    }
-
     if (g_usb.state == USB_OPENING_BULK) {
         int submitResult;
 
@@ -290,7 +262,6 @@ static int handleUsbAttach(int deviceId)
     g_usb.deviceId = deviceId;
 
     if (device != NULL && isAccessoryDevice(device)) {
-        g_staleAccessory = !g_waitingForAccessory && g_usb.state == USB_IDLE;
         g_accessoryDeviceId = deviceId;
         g_waitingForAccessory = 0;
         if (startAndroidAutoVersionHandshake(deviceId) < 0) {
@@ -313,11 +284,22 @@ static int handleUsbAttach(int deviceId)
         return SCE_USBD_ATTACH_FAILED;
     }
 
-    g_protocolRetryCount = 0;
-    g_protocolSettlePolls = USB_PROTOCOL_SETTLE_POLLS;
-    __sync_synchronize();
-    g_protocolRequestPending = 1;
     g_usb.state = USB_GETTING_PROTOCOL;
+
+    {
+        const int submitResult = submitControlRequest(
+            USB_REQ_TO_HOST_VENDOR,
+            USB_GET_PROTOCOL,
+            0,
+            0,
+            sizeof(g_usb.protocol),
+            g_usb.protocol
+        );
+        if (submitResult < 0) {
+            setUsbFailure(VITA_AUTO_USB_FAILURE_PROTOCOL_SUBMIT, submitResult, 0);
+            return SCE_USBD_ATTACH_FAILED;
+        }
+    }
 
     return SCE_USBD_ATTACH_SUCCEEDED;
 }
@@ -333,11 +315,6 @@ static int handleUsbDetach(int deviceId)
     }
 
     if (deviceId == g_accessoryDeviceId || deviceId == g_usb.deviceId) {
-        if (sessionIsOpen()) {
-            g_lastFailureStage = VITA_AUTO_USB_FAILURE_DETACHED;
-            g_lastFailureResult = 0;
-            g_lastFailureCount = (int)g_usb.state;
-        }
         retireSession(USB_IDLE);
         __sync_lock_test_and_set(&g_accessoryControlPipe, -1);
         __sync_lock_test_and_set(&g_usb.bulkInPipe, -1);
@@ -456,10 +433,6 @@ static void resetSession(void)
     g_versionSettlePolls = 0;
     g_versionWriteCompleted = 0;
     g_versionRetryCount = 0;
-    g_protocolRequestPending = 0;
-    g_protocolSettlePolls = 0;
-    g_protocolRetryCount = 0;
-    g_staleAccessory = 0;
     g_accessoryConfigPending = 0;
     g_accessoryConfigured = 0;
     g_bulkEndpointPacketSize = USB_BULK_MAX_PACKET_SIZE;

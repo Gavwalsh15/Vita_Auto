@@ -19,6 +19,7 @@ static uint16_t g_lastTouchY = 0;
 static uint32_t g_touchReportsSent = 0;
 static uint32_t g_touchSendFailures = 0;
 
+// Must match the touch area advertised in service discovery (16:9, 720p).
 constexpr uint32_t AA_TOUCH_WIDTH = 1280;
 constexpr uint32_t AA_TOUCH_HEIGHT = 720;
 constexpr uint32_t AA_TOUCH_MAX_X = AA_TOUCH_WIDTH - 1;

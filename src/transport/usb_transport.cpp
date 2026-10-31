@@ -2,17 +2,37 @@
 
 #include <psp2/kernel/threadmgr.h>
 
+#include <cstdint>
+
 #include "vita_auto_usb.h"
 #include "logger/vita_log.h"
 
 namespace {
 
 constexpr const char* CLIENT_BRIDGE_PATH = "app0:vita_auto_usb_client.suprx";
+
+template <typename T>
+void logClientStub(const char* name, T function)
+{
+    const uintptr_t address = reinterpret_cast<uintptr_t>(function);
+    const volatile uint32_t* words =
+        reinterpret_cast<const volatile uint32_t*>(address);
+    vitaLog(
+        "direct-usb: client stub %s @0x%08x words=%08x/%08x/%08x/%08x",
+        name,
+        static_cast<unsigned int>(address),
+        static_cast<unsigned int>(words[0]),
+        static_cast<unsigned int>(words[1]),
+        static_cast<unsigned int>(words[2]),
+        static_cast<unsigned int>(words[3])
+    );
+}
 constexpr uint32_t POLL_INTERVAL_US = 100000;
 constexpr uint64_t OPEN_TIMEOUT_US = 60000000;
 constexpr uint32_t WRITE_RETRY_INTERVAL_US = 250;
 constexpr uint32_t WRITE_TIMEOUT_US = 250000;
 constexpr uint32_t STOP_RETRY_DELAY_US = 50000;
+constexpr uint64_t HEARTBEAT_INTERVAL_US = 5000000;
 
 }
 
@@ -50,6 +70,8 @@ bool UsbTransport::beginOpen(bool (*cancelled)())
     connectionDeadlineUs_ = 0;
     lastState_ = -1;
     lastVidPid_ = 0xffffffffu;
+    lastRxAtUs_ = 0;
+    nextHeartbeatUs_ = 0;
     if (cancelled())
         return false;
 
@@ -60,6 +82,11 @@ bool UsbTransport::beginOpen(bool (*cancelled)())
         vitaLog("direct-usb: client bridge unavailable; check vita_auto_usb.skprx and reboot");
         return fail(app::AppError::UsbBridgeLoadFailed, loadResult);
     }
+
+    logClientStub("write", &vitaAutoUsbWrite);
+    logClientStub("stop", &vitaAutoUsbStop);
+    logClientStub("failure-result", &vitaAutoUsbGetLastFailureResult);
+    logClientStub("read-timed", &vitaAutoUsbReadWaitTimed);
 
     // Even a failed Start may hold onto resources if its rollback could not finish.
     sessionStarted_ = true;
@@ -107,9 +134,10 @@ OpenPoll UsbTransport::pollOpen(bool (*cancelled)())
 
     if (state != lastState_ || vidPid != lastVidPid_) {
         vitaLogInfo(
-            "direct-usb: state=%d vidpid=0x%08x failure=%d/0x%08x/%d",
+            "direct-usb: state=%d vidpid=0x%08x hostmode=%d failure=%d/0x%08x/%d",
             state,
             vidPid,
+            vitaAutoUsbGetCurrentHostMode(),
             vitaAutoUsbGetLastFailureStage(),
             vitaAutoUsbGetLastFailureResult(),
             vitaAutoUsbGetLastFailureCount()
@@ -124,6 +152,8 @@ OpenPoll UsbTransport::pollOpen(bool (*cancelled)())
     if (state == VITA_AUTO_USB_AA_VERSION_COMPLETE)
     {
         connected_ = true;
+        lastRxAtUs_ = sceKernelGetSystemTimeWide();
+        nextHeartbeatUs_ = lastRxAtUs_ + HEARTBEAT_INTERVAL_US;
         return OpenPoll::Connected;
     }
 
@@ -246,7 +276,10 @@ int UsbTransport::receive(
     {
         connected_ = false;
         vitaLog(
-            "direct-usb: usb failure stage=%d result=0x%08x count=%d",
+            "direct-usb: read failed kernel state=%d vidpid=0x%08x hostmode=%d failure=%d/0x%08x/%d",
+            vitaAutoUsbGetState(),
+            vitaAutoUsbGetLastVidPid(),
+            vitaAutoUsbGetCurrentHostMode(),
             vitaAutoUsbGetLastFailureStage(),
             vitaAutoUsbGetLastFailureResult(),
             vitaAutoUsbGetLastFailureCount()
@@ -263,6 +296,7 @@ int UsbTransport::receive(
         timing->firstCompletedAtUs = metadata.firstCompletedAtUs;
         timing->lastCompletedAtUs = metadata.lastCompletedAtUs;
     }
+    lastRxAtUs_ = sceKernelGetSystemTimeWide();
     data.assign(buffer, buffer + received);
     return 1;
 }
@@ -320,6 +354,35 @@ void UsbTransport::logDiagnostics(const char* reason) const
         diagnostics.writeBusy,
         diagnostics.lastWriteResult,
         diagnostics.lastWriteBytes
+    );
+}
+
+void UsbTransport::logHeartbeat(uint32_t videoFrames)
+{
+    const uint64_t nowUs = sceKernelGetSystemTimeWide();
+    if (nextHeartbeatUs_ != 0 && nowUs < nextHeartbeatUs_)
+        return;
+    nextHeartbeatUs_ = nowUs + HEARTBEAT_INTERVAL_US;
+
+    VitaAutoUsbRxDiagnostics diagnostics{};
+    const int diagResult = vitaAutoUsbGetRxDiagnostics(&diagnostics);
+    const uint64_t rxAgeMs = lastRxAtUs_ == 0 || nowUs < lastRxAtUs_
+        ? 0
+        : (nowUs - lastRxAtUs_) / 1000;
+
+    vitaLog(
+        "direct-usb: heartbeat kernel=%d vidpid=0x%08x failure=%d/0x%08x/%d rx_age_ms=%u video=%u armed=%u publish=%u consume=%u depth=%u",
+        vitaAutoUsbGetState(),
+        vitaAutoUsbGetLastVidPid(),
+        vitaAutoUsbGetLastFailureStage(),
+        vitaAutoUsbGetLastFailureResult(),
+        vitaAutoUsbGetLastFailureCount(),
+        static_cast<unsigned>(rxAgeMs),
+        videoFrames,
+        diagResult >= 0 ? diagnostics.readArmed : 0,
+        diagResult >= 0 ? diagnostics.publishedPackets : 0,
+        diagResult >= 0 ? diagnostics.consumedPackets : 0,
+        diagResult >= 0 ? diagnostics.ringDepth : 0
     );
 }
 

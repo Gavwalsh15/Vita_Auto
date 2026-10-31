@@ -49,6 +49,8 @@ public:
     }
 
     virtual void logDiagnostics(const char*) const {}
+    virtual void logHeartbeat(uint32_t) {}
+    virtual bool wireless() const { return false; }
 
     virtual uint32_t mediaMaxUnacked() const { return 1; }
 

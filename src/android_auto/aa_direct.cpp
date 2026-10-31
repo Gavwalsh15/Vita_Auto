@@ -23,6 +23,52 @@ constexpr uint8_t FRAME_BULK = FRAME_FIRST | FRAME_LAST;
 constexpr size_t TLS_READ_CHUNK_SIZE = 16 * 1024;
 constexpr uint32_t MICROPHONE_SESSION_ID = 1; // First microphone stream session.
 
+// AA's TLS 1.2 records use AES-GCM: 5-byte header, 8-byte explicit nonce,
+// ciphertext, 16-byte tag. The explicit nonce carries the record sequence.
+constexpr size_t TLS_RECORD_HEADER_SIZE = 5;
+constexpr size_t TLS_GCM_NONCE_SIZE = 8;
+constexpr size_t TLS_GCM_TAG_SIZE = 16;
+constexpr size_t TLS_MAX_CIPHERTEXT = 16384 + 2048;
+constexpr uint8_t TLS_APPLICATION_DATA = 0x17;
+constexpr uint16_t TLS_VERSION_1_2 = 0x0303;
+constexpr size_t AA_RESYNC_MAX_BUFFER = 256 * 1024;
+constexpr uint32_t AA_RESYNC_MAX_SKIPPED_FRAMES = 128;
+constexpr uint64_t AA_RESYNC_MAX_SEQUENCE_GAP = 1ull << 24;
+
+bool tlsRecordsTile(const uint8_t* data, size_t length, uint64_t& firstSequence)
+{
+    size_t offset = 0;
+    bool haveFirst = false;
+    uint64_t first = 0;
+
+    while (offset < length) {
+        if (length - offset < TLS_RECORD_HEADER_SIZE)
+            return false;
+        if (data[offset] != TLS_APPLICATION_DATA)
+            return false;
+        if (readBe16(data + offset + 1) != TLS_VERSION_1_2)
+            return false;
+
+        const size_t recordLength = readBe16(data + offset + 3);
+        if (recordLength < TLS_GCM_NONCE_SIZE + TLS_GCM_TAG_SIZE ||
+            recordLength > TLS_MAX_CIPHERTEXT ||
+            recordLength > length - offset - TLS_RECORD_HEADER_SIZE)
+        {
+            return false;
+        }
+        if (!haveFirst) {
+            first = readBe64(data + offset + 5);
+            haveFirst = true;
+        }
+        offset += TLS_RECORD_HEADER_SIZE + recordLength;
+    }
+
+    if (!haveFirst || offset != length)
+        return false;
+    firstSequence = first;
+    return true;
+}
+
 constexpr uint16_t AUTH_COMPLETE = 0x0004;
 constexpr uint16_t SERVICE_DISCOVERY_REQUEST = 0x0005;
 constexpr uint16_t SERVICE_DISCOVERY_RESPONSE = 0x0006;
@@ -69,6 +115,7 @@ void DirectSession::reset()
         outbound_.reserve(64 * 1024);
     openedChannels_ = 0;
     std::memset(mediaSessions_, 0, sizeof(mediaSessions_));
+    std::memset(mediaSessionActive_, 0, sizeof(mediaSessionActive_));
     decryptedFragments_ = {};
     inboundTlsSequenceKnown_ = false;
     inboundTlsLastSequence_ = 0;
@@ -78,6 +125,13 @@ void DirectSession::reset()
     pendingTlsRxLastCompletedAtUs_ = 0;
     tlsReadScratch_.clear();
     tlsPlainScratch_.clear();
+    resyncing_ = false;
+    tlsAwaitingSequence_ = false;
+    resyncBuffer_.clear();
+    resyncRxFirstCompletedAtUs_ = 0;
+    resyncRxLastCompletedAtUs_ = 0;
+    resyncEvents_ = 0;
+    resyncSkippedFrames_ = 0;
 #if VITA_AUTO_PERFORMANCE
     mediaAcksQueued_ = 0;
     mediaAcksSubmitted_ = 0;
@@ -292,14 +346,28 @@ bool DirectSession::feed(
     if (data == nullptr && length != 0)
         return fail(DirectError::InvalidInput);
 
+    if (resyncing_) {
+        if (data != nullptr && length != 0) {
+            if (resyncBuffer_.empty())
+                resyncRxFirstCompletedAtUs_ = rxFirstCompletedAtUs;
+            else if (rxFirstCompletedAtUs != 0 &&
+                     (resyncRxFirstCompletedAtUs_ == 0 ||
+                      rxFirstCompletedAtUs < resyncRxFirstCompletedAtUs_))
+                resyncRxFirstCompletedAtUs_ = rxFirstCompletedAtUs;
+            if (rxLastCompletedAtUs > resyncRxLastCompletedAtUs_)
+                resyncRxLastCompletedAtUs_ = rxLastCompletedAtUs;
+            resyncBuffer_.insert(resyncBuffer_.end(), data, data + length);
+        }
+        return continueResync();
+    }
+
     const std::vector<Frame> frames = parser_.push(
         data,
         length,
         rxFirstCompletedAtUs,
         rxLastCompletedAtUs
     );
-    if (!std::all_of(frames.begin(), frames.end(),
-            [this](const Frame& frame) { return processFrame(frame); }))
+    if (!processFrames(frames))
         return false;
 
     if (parser_.failed()) {
@@ -315,10 +383,216 @@ bool DirectSession::feed(
             head[8], head[9], head[10], head[11],
             head[12], head[13], head[14], head[15]
         );
-        return fail(DirectError::FrameParseFailed);
+        // Before the handshake completes there is no TLS stream to resync,
+        // so keep the old fail-fast behaviour.
+        if (!tls_ || !tls_->secure())
+            return fail(DirectError::FrameParseFailed);
+        beginResync("parser", rxFirstCompletedAtUs, rxLastCompletedAtUs);
+        return continueResync();
     }
 
     return true;
+}
+
+bool DirectSession::processFrames(const std::vector<Frame>& frames)
+{
+    for (const Frame& frame : frames) {
+        if (!processFrame(frame))
+            return false;
+    }
+    return true;
+}
+
+void DirectSession::beginResync(
+    const char* reason,
+    uint64_t rxFirstCompletedAtUs,
+    uint64_t rxLastCompletedAtUs
+)
+{
+    if (!resyncing_) {
+        resyncBuffer_.clear();
+        resyncRxFirstCompletedAtUs_ = 0;
+        resyncRxLastCompletedAtUs_ = 0;
+        resyncing_ = true;
+        vitaLog("aa-resync begin reason=%s", reason);
+    }
+
+    std::vector<uint8_t> pending = parser_.takeBuffer();
+    if (!pending.empty()) {
+        if (resyncBuffer_.empty())
+            resyncRxFirstCompletedAtUs_ = rxFirstCompletedAtUs;
+        else if (rxFirstCompletedAtUs != 0 &&
+                 (resyncRxFirstCompletedAtUs_ == 0 ||
+                  rxFirstCompletedAtUs < resyncRxFirstCompletedAtUs_))
+            resyncRxFirstCompletedAtUs_ = rxFirstCompletedAtUs;
+        if (rxLastCompletedAtUs > resyncRxLastCompletedAtUs_)
+            resyncRxLastCompletedAtUs_ = rxLastCompletedAtUs;
+        resyncBuffer_.insert(resyncBuffer_.end(), pending.begin(), pending.end());
+    }
+
+    if (tls_)
+        tls_->discardInbound();
+    tlsAwaitingSequence_ = false;
+    resyncSkippedFrames_ = 0;
+    decryptedFragments_ = {};
+    pendingTlsRxFirstCompletedAtUs_ = 0;
+    pendingTlsRxLastCompletedAtUs_ = 0;
+}
+
+bool DirectSession::sequencePlausible(uint64_t sequence) const
+{
+    if (!inboundTlsSequenceKnown_)
+        return true;
+    return sequence > inboundTlsLastSequence_ &&
+           sequence - inboundTlsLastSequence_ <= AA_RESYNC_MAX_SEQUENCE_GAP;
+}
+
+DirectSession::ResyncScanResult DirectSession::scanResync(
+    size_t& foundOffset,
+    size_t& foundLength,
+    uint64_t& foundSequence
+) const
+{
+    const size_t size = resyncBuffer_.size();
+    bool needMore = false;
+
+    for (size_t offset = 0; offset + HEADER_SIZE <= size; ++offset) {
+        const uint8_t* const frame = resyncBuffer_.data() + offset;
+        if (frame[0] > DIRECT_MICROPHONE_CHANNEL)
+            continue;
+
+        const uint8_t flags = frame[1];
+        if ((flags & ~0x0fu) != 0)
+            continue;
+        if ((flags & ENCRYPTED) == 0 || (flags & FRAME_TYPE_MASK) != FRAME_BULK)
+            continue;
+
+        const size_t bodyLength = readBe16(frame + 2);
+        if (bodyLength < TLS_RECORD_HEADER_SIZE + TLS_GCM_NONCE_SIZE + TLS_GCM_TAG_SIZE)
+            continue;
+
+        const size_t frameLength = HEADER_SIZE + bodyLength;
+        if (frameLength > size - offset) {
+            // Not enough bytes yet. Only wait if the visible prefix already
+            // looks like an encrypted TLS record with a plausible sequence.
+            if (size - offset < HEADER_SIZE + TLS_RECORD_HEADER_SIZE + TLS_GCM_NONCE_SIZE) {
+                needMore = true;
+                continue;
+            }
+            const uint8_t* const record = frame + HEADER_SIZE;
+            const size_t recordLength = readBe16(record + 3);
+            if (record[0] != TLS_APPLICATION_DATA ||
+                readBe16(record + 1) != TLS_VERSION_1_2 ||
+                recordLength < TLS_GCM_NONCE_SIZE + TLS_GCM_TAG_SIZE ||
+                recordLength > TLS_MAX_CIPHERTEXT ||
+                recordLength > bodyLength - TLS_RECORD_HEADER_SIZE ||
+                !sequencePlausible(readBe64(record + 5)))
+            {
+                continue;
+            }
+            needMore = true;
+            continue;
+        }
+
+        uint64_t sequence = 0;
+        if (!tlsRecordsTile(frame + HEADER_SIZE, bodyLength, sequence))
+            continue;
+        if (!sequencePlausible(sequence))
+            continue;
+
+        foundOffset = offset;
+        foundLength = frameLength;
+        foundSequence = sequence;
+        return ResyncScanResult::Found;
+    }
+
+    return needMore ? ResyncScanResult::NeedMore : ResyncScanResult::NotFound;
+}
+
+bool DirectSession::continueResync()
+{
+    for (unsigned attempt = 0; attempt < 8; ++attempt) {
+        size_t offset = 0;
+        size_t frameLength = 0;
+        uint64_t sequence = 0;
+        const ResyncScanResult scan = scanResync(offset, frameLength, sequence);
+
+        if (scan != ResyncScanResult::Found) {
+            if (resyncBuffer_.size() > AA_RESYNC_MAX_BUFFER) {
+                vitaLog(
+                    "aa-resync failed reason=buffer pending=%u",
+                    static_cast<unsigned int>(resyncBuffer_.size())
+                );
+                return fail(DirectError::FrameParseFailed);
+            }
+            return true;
+        }
+
+        if (offset != 0)
+            resyncBuffer_.erase(resyncBuffer_.begin(), resyncBuffer_.begin() + offset);
+
+        if (!tls_ || !tls_->resyncToSequence(sequence)) {
+            vitaLog(
+                "aa-resync failed reason=tls pending=%u err=0x%08x",
+                static_cast<unsigned int>(resyncBuffer_.size()),
+                tls_ ? tls_->lastError() : 0
+            );
+            return fail(DirectError::TlsReadFailed, tls_ ? tls_->lastError() : 0);
+        }
+
+        inboundTlsSequenceKnown_ = false;
+        tlsAwaitingSequence_ = false;
+        resyncSkippedFrames_ = 0;
+        ++resyncEvents_;
+        vitaLog(
+            "aa-resync ok source=%s dropped=%u kept=%u seq=%08x%08x",
+            offset != 0 ? "scan" : "aligned",
+            static_cast<unsigned int>(offset),
+            static_cast<unsigned int>(resyncBuffer_.size()),
+            static_cast<uint32_t>(sequence >> 32),
+            static_cast<uint32_t>(sequence)
+        );
+
+        const uint64_t rxFirst = resyncRxFirstCompletedAtUs_;
+        const uint64_t rxLast = resyncRxLastCompletedAtUs_;
+        resyncRxFirstCompletedAtUs_ = 0;
+        resyncRxLastCompletedAtUs_ = 0;
+        resyncing_ = false;
+
+        parser_.reset();
+        std::vector<uint8_t> bytes;
+        bytes.swap(resyncBuffer_);
+        const std::vector<Frame> frames = parser_.push(
+            bytes.data(),
+            bytes.size(),
+            rxFirst,
+            rxLast
+        );
+        if (!processFrames(frames))
+            return false;
+        if (!parser_.failed())
+            return true;
+
+        const auto& head = parser_.failureHead();
+        vitaLog(
+            "AA parser failed code=%d (%s) buffered=%u rx=%u head=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+            parser_.errorCode(),
+            parser_.errorName(),
+            static_cast<unsigned int>(parser_.failureBufferedSize()),
+            static_cast<unsigned int>(bytes.size()),
+            head[0], head[1], head[2], head[3],
+            head[4], head[5], head[6], head[7],
+            head[8], head[9], head[10], head[11],
+            head[12], head[13], head[14], head[15]
+        );
+        beginResync("parser", rxFirst, rxLast);
+    }
+
+    vitaLog(
+        "aa-resync failed reason=loop pending=%u",
+        static_cast<unsigned int>(resyncBuffer_.size())
+    );
+    return fail(DirectError::FrameParseFailed);
 }
 
 bool DirectSession::processFrame(const Frame& frame)
@@ -359,6 +633,11 @@ bool DirectSession::processFrame(const Frame& frame)
 
             if (tls_->secure() && state_ != DirectState::TlsOk) {
                 state_ = DirectState::TlsOk;
+                vitaLog(
+                    "direct-usb: TLS established cipher=%s gcm=%u",
+                    tls_->cipherSuite() != nullptr ? tls_->cipherSuite() : "?",
+                    tls_->cipherIsGcm() ? 1u : 0u
+                );
                 std::vector<uint8_t> auth;
                 writeVarintField(auth, 1, 0); // Field 1: auth status OK.
                 // AUTH Complete
@@ -376,6 +655,61 @@ bool DirectSession::processFrame(const Frame& frame)
     }
 
     const TlsRecordInspection inspection = inspectTlsRecords(frame.payload);
+    // The explicit nonce is a TLS 1.2 GCM record sequence. Do not treat an
+    // IV from another cipher suite as a sequence.
+    const bool canResync = tls_ != nullptr && tls_->cipherIsGcm();
+    const uint64_t expectedSequence = inboundTlsLastSequence_ + 1;
+    const bool sequenceMatches =
+        !canResync || !inboundTlsSequenceKnown_ ||
+        (inspection.layoutValid && inspection.hasSequence &&
+         inspection.firstSequence == expectedSequence &&
+         inspection.internallyContiguous);
+    const bool layoutUsable = inspection.layoutValid &&
+                              inspection.hasSequence &&
+                              inspection.recordCount != 0;
+    const bool sequenceSyncNeeded =
+        canResync && (tlsAwaitingSequence_ || !sequenceMatches);
+    const bool wasAwaitingSequence = tlsAwaitingSequence_;
+
+    if (layoutUsable && sequenceSyncNeeded) {
+        // The phone's explicit nonce is the record sequence. Pinning in_ctr
+        // to it recovers from lost records without renegotiating TLS.
+        if (!tls_ || !tls_->resyncToSequence(inspection.firstSequence))
+            return fail(DirectError::TlsReadFailed, tls_ ? tls_->lastError() : 0);
+        if (wasAwaitingSequence || !sequenceMatches) {
+            vitaLog(
+                "aa-resync ok source=%s expected=%08x%08x seq=%08x%08x records=%u",
+                wasAwaitingSequence ? "tls" : "gap",
+                static_cast<uint32_t>(expectedSequence >> 32),
+                static_cast<uint32_t>(expectedSequence),
+                static_cast<uint32_t>(inspection.firstSequence >> 32),
+                static_cast<uint32_t>(inspection.firstSequence),
+                inspection.recordCount
+            );
+        }
+        tlsAwaitingSequence_ = false;
+        resyncSkippedFrames_ = 0;
+        inboundTlsSequenceKnown_ = false;
+    } else if (tlsAwaitingSequence_) {
+        ++resyncSkippedFrames_;
+        if (resyncSkippedFrames_ <= 4 || (resyncSkippedFrames_ % 32) == 0) {
+            vitaLog(
+                "aa-resync skip reason=layout frames=%u records=%u cipher=%u",
+                resyncSkippedFrames_,
+                inspection.recordCount,
+                static_cast<uint32_t>(frame.payload.size())
+            );
+        }
+        if (resyncSkippedFrames_ >= AA_RESYNC_MAX_SKIPPED_FRAMES) {
+            vitaLog(
+                "aa-resync failed reason=layout frames=%u",
+                resyncSkippedFrames_
+            );
+            return fail(DirectError::FrameParseFailed);
+        }
+        return true;
+    }
+
     if (frame.rxFirstCompletedAtUs != 0 &&
         (pendingTlsRxFirstCompletedAtUs_ == 0 ||
          frame.rxFirstCompletedAtUs < pendingTlsRxFirstCompletedAtUs_))
@@ -384,12 +718,6 @@ bool DirectSession::processFrame(const Frame& frame)
     }
     if (frame.rxLastCompletedAtUs > pendingTlsRxLastCompletedAtUs_)
         pendingTlsRxLastCompletedAtUs_ = frame.rxLastCompletedAtUs;
-    const uint64_t expectedSequence = inboundTlsLastSequence_ + 1;
-    const bool sequenceMatches =
-        !inboundTlsSequenceKnown_ ||
-        (inspection.layoutValid && inspection.hasSequence &&
-         inspection.firstSequence == expectedSequence &&
-         inspection.internallyContiguous);
 
     if (!tls_ || !tls_->feed(frame.payload.data(), frame.payload.size())) {
         fail(DirectError::TlsRecordFeedFailed, tls_ ? tls_->lastError() : 0);
@@ -416,6 +744,67 @@ bool DirectSession::processFrame(const Frame& frame)
         tlsPlainScratch_.reserve(frame.payload.size());
     for (;;) {
         const int read = tls_->read(tlsReadScratch_.data(), tlsReadScratch_.size());
+        if (read == TlsClient::ReadRecoverable) {
+            ++resyncEvents_;
+            resyncSkippedFrames_ = 0;
+            // The lost record never reaches processMedia, so acknowledge it
+            // here. Audio sinks advertise max_unacked=1; without this ACK the
+            // phone's permit for the dropped frame is never released and the
+            // stream can stall until resync completes.
+            if (frame.channel >= DIRECT_VIDEO_CHANNEL &&
+                frame.channel <= DIRECT_SYSTEM_AUDIO_CHANNEL &&
+                mediaSessionActive_[frame.channel])
+            {
+                const bool lossAckQueued = sendMediaAck(frame.channel, 1);
+                vitaLog(
+                    "aa-resync ack-loss channel=%u session=%u queued=%u",
+                    frame.channel,
+                    mediaSessions_[frame.channel],
+                    lossAckQueued ? 1u : 0u
+                );
+                if (!lossAckQueued)
+                    return false;
+            }
+            // Records decrypted before the bad one are still valid; deliver
+            // their plaintext before waiting for a new sequence anchor.
+            const uint64_t plainRxFirst = pendingTlsRxFirstCompletedAtUs_;
+            const uint64_t plainRxLast = pendingTlsRxLastCompletedAtUs_;
+            pendingTlsRxFirstCompletedAtUs_ = 0;
+            pendingTlsRxLastCompletedAtUs_ = 0;
+            bool plainOk = true;
+            if (!tlsPlainScratch_.empty()) {
+                plainOk = processDecryptedFrame(
+                    frame.channel,
+                    frame.flags,
+                    tlsPlainScratch_,
+                    plainRxFirst,
+                    plainRxLast
+                );
+                tlsPlainScratch_.clear();
+            }
+            tlsAwaitingSequence_ = true;
+            decryptedFragments_[frame.channel] = DecryptedFragment{};
+            if (!plainOk)
+                return false;
+            vitaLog(
+                "aa-resync begin reason=tls-read err=0x%08x channel=%u flags=0x%02x cipher=%u records=%u layout=%u seq=%08x%08x expected=%08x%08x match=%u hash=%08x accepted=%u anomalies=%u",
+                tls_->lastError(),
+                frame.channel,
+                frame.flags,
+                static_cast<uint32_t>(frame.payload.size()),
+                inspection.recordCount,
+                inspection.layoutValid ? 1 : 0,
+                static_cast<uint32_t>(inspection.firstSequence >> 32),
+                static_cast<uint32_t>(inspection.firstSequence),
+                static_cast<uint32_t>(expectedSequence >> 32),
+                static_cast<uint32_t>(expectedSequence),
+                sequenceMatches ? 1 : 0,
+                tlsPayloadHash(frame.payload),
+                inboundTlsRecordCount_,
+                inboundTlsSequenceAnomalies_
+            );
+            return true;
+        }
         if (read < 0) {
             fail(DirectError::TlsReadFailed, tls_->lastError());
             vitaLog(
@@ -569,6 +958,19 @@ bool DirectSession::processDecryptedMessage(
     const uint8_t* const payloadData = data + 2;
     const size_t payloadSize = length - 2;
 
+    // Log every control/status message, but not the high-rate media frames
+    // (0x0000/0x0001), so the phone's last message before a disconnect is
+    // visible in the log.
+    if (channel == CONTROL_CHANNEL || messageId >= 0x8000)
+    {
+        vitaLogInfo(
+            "direct-usb: rx channel=%u id=0x%04x len=%u",
+            channel,
+            messageId,
+            static_cast<unsigned int>(payloadSize)
+        );
+    }
+
     if (channel == CONTROL_CHANNEL) {
         std::vector<uint8_t> payload(payloadData, payloadData + payloadSize);
         return processControlMessage(messageId, payload);
@@ -593,6 +995,7 @@ bool DirectSession::processDecryptedMessage(
     }
 
     if (mediaSink && messageId == AV_SETUP_REQUEST) {
+        vitaLogInfo("direct-usb: AV setup channel=%u status=OK", channel);
         if (!sendEncrypted(
                 channel,
                 ENCRYPTED_SIGNAL_FLAGS,
@@ -606,7 +1009,7 @@ bool DirectSession::processDecryptedMessage(
                 channel,
                 ENCRYPTED_SIGNAL_FLAGS,
                 VIDEO_FOCUS_INDICATION,
-                videoFocus(true)
+                videoFocus(false)
             );
         }
         return true;
@@ -614,17 +1017,35 @@ bool DirectSession::processDecryptedMessage(
 
     if ((mediaSink || channel == DIRECT_MICROPHONE_CHANNEL) &&
         messageId == AV_START_INDICATION) {
+        const uint32_t session = readFirstVarintField(
+            payloadData,
+            payloadSize,
+            1, // Field 1: media session id.
+            0 // Missing session id falls back to 0.
+        );
+        if (channel < 16) {
+            mediaSessions_[channel] = session;
+            if (mediaSink)
+                mediaSessionActive_[channel] = true;
+        }
+        vitaLogInfo("direct-usb: media start channel=%u session=%u", channel, session);
+        return true;
+    }
+
+    if (mediaSink && messageId == AV_STOP_INDICATION) {
         if (channel < 16)
-            mediaSessions_[channel] = readFirstVarintField(
-                payloadData,
-                payloadSize,
-                1, // Field 1: media session id.
-                0 // Missing session id falls back to 0.
-            );
+            mediaSessionActive_[channel] = false;
+        vitaLogInfo("direct-usb: media stop channel=%u", channel);
         return true;
     }
 
     if (messageId == VIDEO_FOCUS_REQUEST && channel == DIRECT_VIDEO_CHANNEL) {
+        vitaLogInfo(
+            "direct-usb: video focus request channel=%u mode=%u reason=%u",
+            channel,
+            readFirstVarintField(payloadData, payloadSize, 2, 0),
+            readFirstVarintField(payloadData, payloadSize, 3, 0)
+        );
         return sendEncrypted(
             channel,
             ENCRYPTED_SIGNAL_FLAGS,
@@ -791,13 +1212,18 @@ bool DirectSession::processControlMessage(
     if (messageId == PING_REQUEST)
         return sendEncrypted(CONTROL_CHANNEL, ENCRYPTED_SIGNAL_FLAGS, PING_RESPONSE, payload);
 
-    if (messageId == AUDIO_FOCUS_REQUEST)
+    if (messageId == AUDIO_FOCUS_REQUEST) {
+        vitaLogInfo(
+            "direct-usb: audio focus request type=%u",
+            readFirstVarintField(payload.data(), payload.size(), 1, 0)
+        );
         return sendEncrypted(
             CONTROL_CHANNEL,
             ENCRYPTED_SIGNAL_FLAGS,
             AUDIO_FOCUS_RESPONSE,
             audioFocus(payload)
         );
+    }
 
     if (messageId == NAV_FOCUS_REQUEST) {
         std::vector<uint8_t> out;
