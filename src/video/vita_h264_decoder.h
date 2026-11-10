@@ -30,6 +30,7 @@ public:
     int lastError() const { return lastError_; }
     uint32_t lastInitStage() const { return lastInitStage_; }
     uint32_t lastOutputCount() const { return lastOutputCount_; }
+    uint32_t refFrames() const { return refFrames_; }
 #if VITA_AUTO_VERBOSE_LOGGING
     uint32_t outputPictures() const { return outputPictures_; }
 #endif
@@ -44,13 +45,16 @@ private:
         void*& base
     );
     void freeMemBlock(int& uid, void*& base);
+    bool tryInit(uint32_t width, uint32_t height, uint32_t refFrames);
 
     bool initialized_ = false;
     bool libraryLoaded_ = false;
     bool libraryInitialized_ = false;
     uint32_t width_ = 0;
     uint32_t height_ = 0;
+    uint32_t refFrames_ = 0;
     uint32_t submittedAccessUnits_ = 0;
+    uint64_t timestamp_ = 0; // 90 kHz, advances once per submitted access unit
 #if VITA_AUTO_VERBOSE_LOGGING
     uint32_t outputPictures_ = 0;
 #endif

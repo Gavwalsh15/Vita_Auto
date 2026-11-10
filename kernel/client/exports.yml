@@ -27,3 +27,21 @@ vita_auto_usb_c:
         - vitaAutoUsbReadWaitTimed: 0xA0A01011
         - vitaAutoUsbStop: 0xA0A01012
         - vitaAutoUsbDrainReads: 0xA0A01013
+        - vitaAutoBtStart: 0xA0A01021
+        - vitaAutoBtStop: 0xA0A01022
+        - vitaAutoBtReadWaitTimed: 0xA0A01023
+        - vitaAutoBtWrite: 0xA0A01024
+        - vitaAutoBtGetInfo: 0xA0A01026
+        - vitaAutoBtEnable: 0xA0A01027
+        - vitaAutoBtDisable: 0xA0A01028
+        - vitaAutoBtReadEvents: 0xA0A01029
+        - vitaAutoBtConfigureName: 0xA0A0102B
+        - vitaAutoBtGetOriginalName: 0xA0A0102C
+        - vitaAutoBtConnectState: 0xA0A0102F
+        - vitaAutoBtSetOptions: 0xA0A01030
+        - vitaAutoBtDisconnect: 0xA0A01031
+        - vitaAutoApStart: 0xA0A01040
+        - vitaAutoApStop: 0xA0A01041
+        - vitaAutoApKeepAlive: 0xA0A01042
+        - vitaAutoApGetInfo: 0xA0A01043
+        - vitaAutoApConfigureInterface: 0xA0A01044

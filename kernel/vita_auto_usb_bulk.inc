@@ -126,25 +126,22 @@ static void resetBulkTransfers(void)
 static void setUsbFailure(enum VitaAutoUsbFailureStage stage, int result, int count)
 {
     if (!sessionIsOpen())
-        return; /* Stop does not mean failure */
+        return; // Stop does not mean failure
     g_lastFailureStage = stage;
     g_lastFailureResult = result;
     g_lastFailureCount = count;
     retireSession(USB_FAILED);
 }
 
-/*
- USB has no standard pre-accessory USB vendor ID. Keep the first hardware
- common Android vendors and avoid taking over arbitrary USB devices.
- */
+// No standard pre-accessory vendor ID exists: keep common Android vendors only, to avoid taking over other devices.
 static int isSupportedAndroidVendor(unsigned short vendorId)
 {
     switch (vendorId) {
-    case 0x18d1: /* Google / Android accessory mode */
-    case 0x04e8: /* Samsung */
-    case 0x22b8: /* Motorola */
-    case 0x2a70: /* OnePlus */
-    case 0x2717: /* Xiaomi */
+    case 0x18d1: // Google / Android accessory mode
+    case 0x04e8: // Samsung
+    case 0x22b8: // Motorola
+    case 0x2a70: // OnePlus
+    case 0x2717: // Xiaomi
         return 1;
     default:
         return 0;
@@ -384,8 +381,7 @@ static void handleUsbTransferDone(int32_t result, int32_t count, void *arg)
 // Bulk transfer completions and receive scheduler.
 static void handleAaBulkWriteDone(int32_t result, int32_t count, void *arg)
 {
-    /* Capture before releasing writeBusy. The app may immediately queue its
-     next write and replace writeExpectedLength on another core. */
+    // Capture before releasing writeBusy: the app may queue the next write and replace writeExpectedLength on another core.
     const int writeFailed = result < 0 || count < 0 ||
         count != (int)g_bulkShared->writeExpectedLength;
     (void)arg;
@@ -488,8 +484,7 @@ static void handleAaBulkReadDone(int32_t result, int32_t count, void *arg)
                 request->buffer[AA_VERSION_RESPONSE_MINOR_LOW]
         );
         g_usb.state = USB_AA_VERSION_COMPLETE;
-        /* The version response is consumed by the kernel; keep its sequence
-         position so later pipelined TLS packets publish in strict order. */
+        // The kernel consumes the version response; keep its sequence position so pipelined TLS packets publish in order.
         completeBulkReadRequest(request, 0);
         submitBulkRead();
         return;
@@ -508,8 +503,7 @@ static void handleAaBulkReadDone(int32_t result, int32_t count, void *arg)
         submitBulkRead();
 }
 
-/* Publish at most one request, in submission order. An out-of-order completion
- or a full ring stays in its DMA slot until a later scheduler pass. */
+// Publish at most one request, in submission order; an out-of-order completion or full ring waits in its DMA slot.
 static int publishCompletedBulkReads(void)
 {
     int requestIndex;
@@ -591,9 +585,7 @@ static BulkReadRequest *findFreeBulkReadRequest(void)
     return NULL;
 }
 
-/* Callbacks and the reader can both request a refill. Only the scheduler owner
- publishes packets or submits transfers; reentrant calls set Pending so the
- owner checks for more work before releasing the scheduler. */
+// Only the scheduler owner submits transfers; reentrant calls set Pending so it rechecks before releasing.
 static int submitBulkRead(void)
 {
     int failed = 0;
@@ -621,8 +613,7 @@ static int submitBulkRead(void)
                 madeProgress = 1;
 
             outstanding = countOutstandingBulkReads();
-            /* Reserve ring space for every outstanding request. One slot stays
-             empty so equal head/tail indices unambiguously mean an empty ring. */
+            // Reserve ring space for every outstanding request; one slot stays empty so equal head/tail means empty.
             reservedDepth =
                 bulkReadRingDepth(g_bulkShared->readHead, g_bulkShared->readTail) +
                 (uint32_t)outstanding;
@@ -658,9 +649,7 @@ static int submitBulkRead(void)
                     request->submitSequence = 0;
                     request->state = BULK_READ_FREE;
 
-                    /* Some Vita USBD revisions may permit only one queued
-                     transfer per pipe. Retain a working pipeline rather
-                     than failing the AA session in that case. */
+                    // Some USBD revisions allow one queued transfer per pipe: keep a working pipeline rather than fail.
                     if (outstanding > 0) {
                         g_bulkReadConcurrencyLimit = outstanding;
                         ksceDebugPrintf(
@@ -675,8 +664,7 @@ static int submitBulkRead(void)
                     break;
                 }
 
-                /* A very fast completion may have changed SUBMITTING to
-                 COMPLETE from inside ksceUsbdBulkTransfer. */
+                // A very fast completion may have changed SUBMITTING to COMPLETE inside ksceUsbdBulkTransfer.
                 __sync_bool_compare_and_swap(
                     &request->state,
                     BULK_READ_SUBMITTING,

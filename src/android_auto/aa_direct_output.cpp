@@ -37,6 +37,17 @@ bool DirectSession::sendPingRequest()
                          request.data(), request.size());
 }
 
+bool DirectSession::sendVideoFocus(bool projected)
+{
+    if (!tls_ || !tls_->secure() || state_ == DirectState::Error)
+        return false;
+    if (state_ != DirectState::MediaReady)
+        return true;
+    constexpr uint16_t VIDEO_FOCUS_INDICATION = 0x8008;
+    return sendEncrypted(DIRECT_VIDEO_CHANNEL, ENCRYPTED_SIGNAL_FLAGS,
+                         VIDEO_FOCUS_INDICATION, videoFocus(true, projected));
+}
+
 bool DirectSession::sendShutdownRequest()
 {
     if (!tls_ || !tls_->secure() || state_ == DirectState::Error)
@@ -50,21 +61,29 @@ bool DirectSession::sendShutdownRequest()
 
 bool DirectSession::sendTouch(
     TouchAction action,
-    uint16_t x,
-    uint16_t y,
-    uint32_t pointerId
+    uint8_t actionIndex,
+    const TouchPointer* pointers,
+    size_t count
 ) {
     if (!inputReady())
         return true;
+    if (pointers == nullptr || count == 0 || count > MAX_TOUCH_POINTERS)
+        return false;
 
-    FixedWriter<32> pointer;
-    FixedWriter<48> touch;
-    FixedWriter<64> report;
-    if (!pointer.varintField(1, std::min<uint16_t>(x, INPUT_MAX_X)) || // Field 1: X coordinate.
-        !pointer.varintField(2, std::min<uint16_t>(y, INPUT_MAX_Y)) || // Field 2: Y coordinate.
-        !pointer.varintField(3, pointerId) || // Field 3: pointer id.
-        !touch.bytesField(1, pointer.data(), pointer.size()) || // Field 1: pointer data.
-        !touch.varintField(2, 0) || // Field 2: display id.
+    // Up to six pointers of at most 16 bytes each, plus the action fields.
+    FixedWriter<128> touch;
+    FixedWriter<160> report;
+    for (size_t i = 0; i < count; ++i) {
+        FixedWriter<32> pointer;
+        if (!pointer.varintField(1, std::min<uint16_t>(pointers[i].x, INPUT_MAX_X)) || // Field 1: X coordinate.
+            !pointer.varintField(2, std::min<uint16_t>(pointers[i].y, INPUT_MAX_Y)) || // Field 2: Y coordinate.
+            !pointer.varintField(3, pointers[i].id) || // Field 3: pointer id.
+            !touch.bytesField(1, pointer.data(), pointer.size())) // Field 1: pointer data, repeated.
+        {
+            return false;
+        }
+    }
+    if (!touch.varintField(2, actionIndex) || // Field 2: index of the pointer the action is about.
         !touch.varintField(3, static_cast<uint8_t>(action)) || // Field 3: touch action.
         !report.varintField(1, sceKernelGetSystemTimeWide()) || // Field 1: event timestamp.
         !report.bytesField(3, touch.data(), touch.size())) // Field 3: touch event.

@@ -1,15 +1,22 @@
 #pragma once
 
+#include <cstdint>
+
 #include "transport/transport.h"
 
 
+namespace net_stack {
+int acquire();
+void release();
+} // namespace net_stack
+
 class TcpTransport : public Transport {
 public:
-    explicit TcpTransport(const char* hostOverride = "");
+    // hostOverride is the phone's IP when it is not the hotspot gateway.
+    explicit TcpTransport(const char* hostOverride = "", uint16_t listenPort = 0);
     ~TcpTransport() override { close(); }
 
-    bool open(bool (*cancelled)()) override;
-    bool beginOpen(bool (*cancelled)(), bool strict);
+    bool beginOpen(bool (*cancelled)());
     OpenPoll pollOpen(bool (*cancelled)());
 
     int close() override;
@@ -25,9 +32,14 @@ public:
     void logDiagnostics(const char* reason) const override;
     // Wi-Fi round trips are 5-50 ms.
     uint32_t mediaMaxUnacked() const override { return 3; }
+    void useOwnAccessPoint(bool up);
 
 private:
+    bool serverMode() const { return listenPort_ != 0; }
     bool initNetwork();
+    OpenPoll pollListen(uint64_t nowUs);
+    void closeListen();
+    // AppError::None on success; otherwise why no host could be found.
     app::AppError lookupHost(int* detail);
     OpenPoll startAttempt(uint64_t nowUs);
     OpenPoll finishAttempt();
@@ -37,6 +49,9 @@ private:
 
     char hostOverride_[40] = {};
     char host_[64] = {};
+    uint16_t listenPort_ = 0;
+    bool localNetwork_ = false;
+    int listenSocket_ = -1;
     bool holdsNet_ = false;
 
     bool wifiReady_ = false;
@@ -46,8 +61,6 @@ private:
     uint64_t nextAttemptUs_ = 0;
     uint64_t nextWifiCheckUs_ = 0;
     unsigned attempts_ = 0;
-    const char* connectStage_ = "none";
-    int connectDetail_ = 0;
 
     int socket_ = -1;
     int rxEpoll_ = -1;

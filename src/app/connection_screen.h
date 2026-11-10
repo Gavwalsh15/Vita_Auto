@@ -9,6 +9,6 @@ enum class ConnectionScreen { WaitingForPhone, Connecting, Disconnecting, Retryi
 
 void showConnectionScreen(ConnectionScreen screen, AppError error, unsigned retrySeconds,
                           bool audioOnVita, bool settingsSaved, ConnectionMode mode,
-                          bool canChangeMode = true);
+                          bool canChangeMode = true, bool carplay = false);
 
 } // namespace app

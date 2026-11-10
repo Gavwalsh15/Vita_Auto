@@ -7,18 +7,6 @@
 
 namespace android_auto {
 
-struct TlsRecordInspection {
-    bool layoutValid = false;
-    bool hasSequence = false;
-    bool internallyContiguous = true;
-    uint32_t recordCount = 0;
-    uint64_t firstSequence = 0;
-    uint64_t lastSequence = 0;
-};
-
-uint32_t tlsPayloadHash(const std::vector<uint8_t>& data);
-TlsRecordInspection inspectTlsRecords(const std::vector<uint8_t>& data);
-
 void writeBe64(uint8_t* out, uint64_t value);
 
 template <typename ByteWriter>
@@ -100,7 +88,8 @@ uint32_t readFirstVarintField(
 
 std::vector<uint8_t> statusOk();
 std::vector<uint8_t> avSetupOk(uint32_t maxUnacked);
-std::vector<uint8_t> videoFocus(bool unsolicited = false);
+// projected false is NATIVE: the head unit takes the screen back from the phone.
+std::vector<uint8_t> videoFocus(bool unsolicited = false, bool projected = true);
 std::vector<uint8_t> audioFocus(const std::vector<uint8_t>& request);
 std::vector<uint8_t> sensorEvent(uint32_t sensorType);
 

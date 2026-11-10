@@ -1,6 +1,4 @@
-/* Linked into the app executable, not the SUPRX. This bootstraps the user-mode
- bridge after the kernel plugin is present; the bridge exports a no-op with
- the same name for callers that already have the module loaded. */
+// Linked into the app executable, not the SUPRX; bootstraps the user-mode bridge.
 
 #include "vita_auto_usb.h"
 

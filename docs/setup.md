@@ -1,132 +1,123 @@
 # Setup and Install
 
-This guide is for installing release builds on a Vita and connecting a phone.
-For source layout and maintainer notes, read [architecture.md](architecture.md).
+For wireless see [wireless.md](wireless.md), for CarPlay [carplay.md](carplay.md),
+for the code [architecture.md](architecture.md).
 
-## What You Need
+## What you need
 
-- A hacked PlayStation Vita with taiHEN.
-- A phone with Android Auto.
-- A USB cable.
-- A USB OTG/power arrangement that makes the phone see a stable 5 V USB host.
-- The Vita Auto release zip.
-
-Android phones expect VBUS power before they behave
-like a USB device. The Vita does not expose a powered USB-A host port, so
-most setups need an OTG adapter or Y-cable that supplies 5 V externally while
-still connecting data between the Vita and the phone. This will also charge the vita.
-
-## OTG / Power Diagram
-
-The goal is data between the Vita and phone, plus a stable external 5 V supply
-on the phone's USB VBUS side.
+- A hacked Vita with taiHEN, and either an Android phone with Android Auto or, for
+  CarPlay, an iPhone.
+- A USB data cable and an OTG/power arrangement that makes the phone see a stable
+  5 V host. The Vita has no powered USB-A host port, so use a powered OTG adapter
+  or Y-cable (it also charges the Vita).
 
 ```mermaid
 flowchart LR
-    Vita[PlayStation Vita\nVita Auto app + USB plugin]
-    Adapter[Powered OTG adapter or Y-cable]
-    Phone[Android phone\nAndroid Auto device]
-    Power[External 5 V USB power]
-
-    Vita <-->|USB data | Adapter
-    Adapter <-->|USB data | Phone
-    Power -->|5 V | Adapter
+    Vita[Vita\nVita Auto + USB plugin] <-->|USB data| Adapter[Powered OTG adapter or Y-cable]
+    Adapter <-->|USB data| Phone[Android phone]
+    Power[External 5 V USB power] -->|5 V| Adapter
 ```
 
-## Release Files
+## Install
 
-A release zip contains:
+The release zip holds three files; do not rename them.
 
 | File | Install manually? | Purpose |
 | --- | --- | --- |
-| `vita_auto.vpk` | Yes | Installs the Vita app |
-| `vita_auto_usb.skprx` | Yes | Kernel USB plugin loaded by taiHEN |
-| `vita_auto_usb_client.suprx` | No | User-mode bridge, the VPK also bundles this as `app0:vita_auto_usb_client.suprx` |
+| `vita_auto.vpk` | Yes | The app (also bundles the bridge as `app0:vita_auto_usb_client.suprx`) |
+| `vita_auto_usb.skprx` | Yes | Kernel plugin loaded by taiHEN |
+| `vita_auto_usb_client.suprx` | No | User-mode bridge, loaded from inside the VPK |
 
-Do not rename the files inside the release zip. The app loads the client bridge
-from `app0:vita_auto_usb_client.suprx`.
-
-## Install Steps
-
-1. Install `vita_auto.vpk` with VitaShell or your preferred VPK installer.
-2. Copy `vita_auto_usb.skprx` to a taiHEN plugin location, for example:
-
-   ```text
-   ur0:tai/vita_auto_usb.skprx
-   ```
-
-3. Add the kernel plugin under `*KERNEL` in `ur0:tai/config.txt`:
+1. Install `vita_auto.vpk`. It is an unsafe app: turn on **Enable Unsafe Homebrew**
+   in Settings > HENkaku Settings first.
+2. Copy `vita_auto_usb.skprx` to `ur0:tai/` and add it under `*KERNEL` in
+   `ur0:tai/config.txt`:
 
    ```text
    *KERNEL
    ur0:tai/vita_auto_usb.skprx
    ```
 
-4. Reboot the Vita.
-5. Open Vita Auto.
-6. Connect the phone through your powered OTG setup.
-7. Unlock the phone and accept any Android Auto prompts.
+3. Reboot, open Vita Auto, connect the phone through the powered OTG setup, unlock
+   it and accept any Android Auto prompts.
+
+## Android Auto or CarPlay
+
+The app runs one at a time, chosen by `carplay` in the settings file (below). With
+`carplay=off` (the default) it runs Android Auto over USB or wirelessly. With
+`carplay=on` it runs wireless CarPlay only: USB, the Headunit Server and the Android
+Auto Bluetooth bootstrap are not started, so an Android phone cannot connect. Press
+**Square** on the connection screen to switch (it is saved), or edit the setting and
+reopen the app. The USB plugin must be installed either way
+(CarPlay's Bluetooth and Wi-Fi access point live in it).
 
 ## Controls
 
-- **Cross** retries immediately from an error/retry screen.
-- **Circle** exits from a connection/error screen, including while waiting for USB.
-- **Start + Select** disconnects, including during streaming or while waiting for a phone.
-- On **Disconnected**, **Cross** reconnects and **Circle** exits.
-- **Square** cycles the connection: Auto (USB or Wi-Fi, whichever appears
-  first), USB only, Wi-Fi only (Headunit Server). 
-- **Triangle** changes **Music + Nav: Vita / Phone** while disconnected or on a retry/error
-  screen. Press **Cross** to connect with that choice. Changing it pauses automatic retries.
+The connection screen shows the state (Waiting for phone, Connecting, ...) and two
+settings as rows of choices with the active one in brackets: **Mode** (Auto, USB,
+Wi-Fi, CarPlay) and **Music + Nav** (Vita, Phone; Android Auto only). The button for
+changing each is shown beside it.
 
-To change audio during a session, press **Start + Select**, wait for **Disconnected**,
-then press **Triangle** and **Cross**. Music and navigation follow the same setting.
-**Vita** is the default. **Phone** leaves their routing to Android, including its
-selected Bluetooth output. System sounds still use the Vita, and its microphone
-remains available in either mode.
+- **Cross** retries; on **Disconnected** it reconnects.
+- **Circle** exits from a connection/error screen or **Disconnected**.
+- **Start + Select** disconnects, including while streaming or waiting.
+- **Square** cycles the connection: Auto (USB, Wi-Fi or Bluetooth, first to appear),
+  USB only, Wi-Fi only (Headunit Server and Bluetooth), Apple CarPlay (wireless).
+- **Triangle** toggles **Music + Nav: Vita / Phone** while disconnected or on a
+  retry screen (it pauses automatic retries; press **Cross** to connect). To change
+  it mid-session: Start + Select, wait for **Disconnected**, Triangle, Cross.
+  **Phone** leaves music and navigation to Android's own routing; system sounds and
+  the microphone stay on the Vita.
 
-All settings live in one file, `ux0:data/vita_auto/vita_auto_settings.txt`. The
-app writes every option, with a short description of each at the top.
+In a session (the same for Android Auto and CarPlay):
+
+- **Cross** selects, **Circle** goes back, **Square** is the voice assistant (Android
+  Auto), **Triangle** play/pause, **L** / **R** previous/next track.
+- **D-pad left/right** and the **left stick** turn the rotary knob one item at a
+  time (held: repeats). **D-pad up/down** and the **right stick** move the focus.
+- Each stick and the D-pad give one direction at a time: a diagonal is the axis
+  pushed further, a second D-pad direction is ignored while the first is held, and
+  the bounce of a released stick does not count as a step the other way. Whatever is
+  held when the session starts is ignored until it is let go.
+
+HOME is blocked while the app owns USB, including between retries: press
+**Start + Select** and wait for **Disconnected** first. If cleanup fails the app
+shows **Restart required** and keeps HOME locked.
+
+## Settings
+
+`ux0:data/vita_auto/vita_auto_settings.txt` holds every option, written by the app
+with a description of each at the top (lines without `=` are comments):
+
 ```
-audio=vita
-connection=auto
-host=
+audio=vita              vita | phone
+connection=auto         auto | usb | wifi
+host=                   Headunit Server address (wireless.md)
+bluetooth=on            Bluetooth bootstrap (wireless.md)
+bluetooth_name=Vita Auto
+wifi_password=          network the phone is told to join (wireless.md)
+wifi_ap=off             Vita hosts the Wi-Fi network (wireless.md)
+wifi_ap_ssid=Vita Auto
+wifi_ap_password=vitaauto
+wifi_ap_channel=6
+carplay=off             on = Apple CarPlay instead of Android Auto (carplay.md)
+carplay_audio=full      full | opus | basic: audio formats CarPlay offers (carplay.md)
+original_device_name=   managed by the app; leave it alone
 ```
 
-`audio` is `vita` or `phone`. `connection` is `auto` (default: listen for USB
-and Wi-Fi together), `usb` or `wifi`. `host` is optional (see [wireless.md](wireless.md)).
+## Logs, errors, troubleshooting
 
-HOME is blocked while the app owns USB, including between automatic retries.
-To open LiveArea, press **Start + Select** and wait for **Disconnected** before
-pressing HOME. Reopening the app leaves it disconnected until you press **Cross**.
-If cleanup fails, the app shows **Restart required** and keeps HOME locked.
+The log is `ux0:data/vita_auto/vita_auto.log`. The error screen shows a numeric code
+and label; include both in bug reports. Use the quiet release normally and the
+diagnostic release when you need extra USB, protocol, audio, video or reconnect logs
+(it also writes the raw Bluetooth event, AirPlay and mDNS dumps; the quiet one keeps
+only outcomes and errors).
 
-## Logs and Errors
+`bt: the kernel plugin is not the build this app was made with` means the app and
+`vita_auto_usb.skprx` come from different builds: install all three files together
+and reboot the Vita.
 
-The app writes logs to:
-
-```text
-ux0:data/vita_auto/vita_auto.log
-```
-
-The error screen shows a numeric code and label. For bug reports, include both
-the screen error and the log file when possible.
-
-Use the quiet release first. Use the diagnostic release when you need extra logs
-for USB, Android Auto protocol, audio, video, or reconnect failures.
-
-## Troubleshooting
-
-If the app stays on the waiting screen:
-
-- Check that `vita_auto_usb.skprx` is under `*KERNEL`.
-- Reboot after editing tai config.
-- Confirm the phone is connected through a data cable.
-- Confirm the OTG adapter or Y-cable supplies 5 V to the phone side.
-- Unlock the phone and look for Android Auto prompts.
-
-If the app reports a cleanup/restart error:
-
-- Reboot the Vita before trying another session.
-- If it repeats, look in `ux0:data/vita_auto/vita_auto.log`.
-
-For wireless setup, see [wireless.md](wireless.md).
+If the app stays on the waiting screen (Android Auto): check `vita_auto_usb.skprx` is under
+`*KERNEL` and the Vita was rebooted, the cable carries data, the adapter supplies
+5 V to the phone side, and the phone is unlocked. After a cleanup/restart error,
+reboot the Vita and check the log if it repeats.

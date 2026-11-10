@@ -24,7 +24,13 @@ static inputs::InputEventQueue<DIRECT_INPUT_QUEUE_CAPACITY> g_directInputQueue;
 static SceUID g_directInputThread = -1;
 static volatile uint32_t g_directInputThreadRunning = 0;
 static volatile uint32_t g_directInputReady = 0;
+static bool g_producerWasReady = false;
 static DeliveryStats g_deliveryStats;
+
+static_assert(
+    inputs::MAX_TOUCH_POINTERS <= android_auto::MAX_TOUCH_POINTERS,
+    "the session must be able to send every finger the panel can report"
+);
 
 android_auto::TouchAction toAndroidAutoTouchAction(inputs::TouchAction action)
 {
@@ -33,6 +39,10 @@ android_auto::TouchAction toAndroidAutoTouchAction(inputs::TouchAction action)
         return android_auto::TouchAction::Down;
     case inputs::TouchAction::Up:
         return android_auto::TouchAction::Up;
+    case inputs::TouchAction::PointerDown:
+        return android_auto::TouchAction::PointerDown;
+    case inputs::TouchAction::PointerUp:
+        return android_auto::TouchAction::PointerUp;
     case inputs::TouchAction::Move:
     default:
         return android_auto::TouchAction::Move;
@@ -118,8 +128,14 @@ bool sampleDirectInput()
         __ATOMIC_ACQUIRE
     ) != 0;
 
-    if (!inputReady)
+    if (!inputReady) {
+        g_producerWasReady = false;
         return false;
+    }
+    if (!g_producerWasReady) {
+        g_producerWasReady = true;
+        resyncControllerInput();
+    }
 
     pollTouchInput(queueTouchEvent);
     pollControllerInput(queueButtonEvent);
@@ -207,11 +223,20 @@ bool deliverDirectInputEvent(
     const uint64_t encodeStartUs = performance::nowUs();
     bool sent = false;
     if (event.type == inputs::InputEventType::Touch) {
+        android_auto::TouchPointer pointers[android_auto::MAX_TOUCH_POINTERS];
+        const size_t count = event.touch.count < inputs::MAX_TOUCH_POINTERS
+            ? event.touch.count
+            : inputs::MAX_TOUCH_POINTERS;
+        for (size_t i = 0; i < count; ++i) {
+            pointers[i].x = event.touch.pointers[i].x;
+            pointers[i].y = event.touch.pointers[i].y;
+            pointers[i].id = event.touch.pointers[i].id;
+        }
         sent = session.sendTouch(
             toAndroidAutoTouchAction(event.touch.action),
-            event.touch.x,
-            event.touch.y,
-            event.touch.pointerId
+            event.touch.actionIndex,
+            pointers,
+            count
         );
     } else {
         sent = sendControllerEvent(session, event.button);
@@ -270,6 +295,7 @@ void init()
     initControllerInput();
     g_directInputQueue.reset();
     g_deliveryStats = {};
+    g_producerWasReady = false;
     setReady(false);
 }
 
@@ -291,6 +317,30 @@ void setReady(bool ready)
 bool drain(android_auto::DirectSession& session)
 {
     return drainDirectInputQueue(session);
+}
+
+bool drainTo(EventSink sink)
+{
+    InputEvent event;
+    InputEvent latestMove;
+    bool hasMove = false;
+    while (g_directInputQueue.pop(event)) {
+        const bool isMove = event.type == InputEventType::Touch &&
+                            event.touch.action == TouchAction::Move;
+        if (isMove) {
+            latestMove = event;
+            hasMove = true;
+            continue;
+        }
+        if (hasMove) {
+            if (!sink(latestMove))
+                return false;
+            hasMove = false;
+        }
+        if (!sink(event))
+            return false;
+    }
+    return !hasMove || sink(latestMove);
 }
 
 DeliveryStats deliveryStats() { return g_deliveryStats; }

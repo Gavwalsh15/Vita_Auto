@@ -12,9 +12,6 @@ struct mbedtls_ctr_drbg_context;
 
 namespace android_auto {
 
-// A TLS 1.2 client.
-// AA wraps the resulting TLS records in its own frames; 
-// callers feed and drain raw bytes.
 class TlsClient {
 public:
     TlsClient();

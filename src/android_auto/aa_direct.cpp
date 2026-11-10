@@ -70,10 +70,6 @@ void DirectSession::reset()
     openedChannels_ = 0;
     std::memset(mediaSessions_, 0, sizeof(mediaSessions_));
     decryptedFragments_ = {};
-    inboundTlsSequenceKnown_ = false;
-    inboundTlsLastSequence_ = 0;
-    inboundTlsRecordCount_ = 0;
-    inboundTlsSequenceAnomalies_ = 0;
     pendingTlsRxFirstCompletedAtUs_ = 0;
     pendingTlsRxLastCompletedAtUs_ = 0;
     tlsReadScratch_.clear();
@@ -114,6 +110,7 @@ bool DirectSession::start()
 {
     reset();
     state_ = DirectState::VersionNegotiating;
+    // Android Auto protocol 1.7, matching the kernel USB handshake.
     return sendPlainControl(VERSION_REQUEST, {0x00, 0x01, 0x00, 0x07});
 }
 
@@ -361,7 +358,6 @@ bool DirectSession::processFrame(const Frame& frame)
                 state_ = DirectState::TlsOk;
                 std::vector<uint8_t> auth;
                 writeVarintField(auth, 1, 0); // Field 1: auth status OK.
-                // AUTH Complete
                 return sendPlainControl(AUTH_COMPLETE, auth);
             }
             return true;
@@ -375,7 +371,6 @@ bool DirectSession::processFrame(const Frame& frame)
         return true;
     }
 
-    const TlsRecordInspection inspection = inspectTlsRecords(frame.payload);
     if (frame.rxFirstCompletedAtUs != 0 &&
         (pendingTlsRxFirstCompletedAtUs_ == 0 ||
          frame.rxFirstCompletedAtUs < pendingTlsRxFirstCompletedAtUs_))
@@ -384,26 +379,12 @@ bool DirectSession::processFrame(const Frame& frame)
     }
     if (frame.rxLastCompletedAtUs > pendingTlsRxLastCompletedAtUs_)
         pendingTlsRxLastCompletedAtUs_ = frame.rxLastCompletedAtUs;
-    const uint64_t expectedSequence = inboundTlsLastSequence_ + 1;
-    const bool sequenceMatches =
-        !inboundTlsSequenceKnown_ ||
-        (inspection.layoutValid && inspection.hasSequence &&
-         inspection.firstSequence == expectedSequence &&
-         inspection.internallyContiguous);
 
     if (!tls_ || !tls_->feed(frame.payload.data(), frame.payload.size())) {
         fail(DirectError::TlsRecordFeedFailed, tls_ ? tls_->lastError() : 0);
         vitaLog(
-            "direct-usb: TLS feed error=0x%08x records=%u layout=%u seq=%08x%08x expected=%08x%08x match=%u hash=%08x cipher=%u",
+            "direct-usb: TLS feed error=0x%08x cipher=%u",
             lastTlsError_,
-            inspection.recordCount,
-            inspection.layoutValid ? 1 : 0,
-            static_cast<uint32_t>(inspection.firstSequence >> 32),
-            static_cast<uint32_t>(inspection.firstSequence),
-            static_cast<uint32_t>(expectedSequence >> 32),
-            static_cast<uint32_t>(expectedSequence),
-            sequenceMatches ? 1 : 0,
-            tlsPayloadHash(frame.payload),
             static_cast<uint32_t>(frame.payload.size())
         );
         return false;
@@ -419,21 +400,11 @@ bool DirectSession::processFrame(const Frame& frame)
         if (read < 0) {
             fail(DirectError::TlsReadFailed, tls_->lastError());
             vitaLog(
-                "direct-usb: TLS read error=0x%08x channel=%u flags=0x%02x cipher=%u records=%u layout=%u seq=%08x%08x expected=%08x%08x match=%u hash=%08x accepted=%u anomalies=%u",
+                "direct-usb: TLS read error=0x%08x channel=%u flags=0x%02x cipher=%u",
                 lastTlsError_,
                 frame.channel,
                 frame.flags,
-                static_cast<uint32_t>(frame.payload.size()),
-                inspection.recordCount,
-                inspection.layoutValid ? 1 : 0,
-                static_cast<uint32_t>(inspection.firstSequence >> 32),
-                static_cast<uint32_t>(inspection.firstSequence),
-                static_cast<uint32_t>(expectedSequence >> 32),
-                static_cast<uint32_t>(expectedSequence),
-                sequenceMatches ? 1 : 0,
-                tlsPayloadHash(frame.payload),
-                inboundTlsRecordCount_,
-                inboundTlsSequenceAnomalies_
+                static_cast<uint32_t>(frame.payload.size())
             );
             return false;
         }
@@ -444,14 +415,6 @@ bool DirectSession::processFrame(const Frame& frame)
             tlsReadScratch_.begin(),
             tlsReadScratch_.begin() + read
         );
-    }
-
-    if (!sequenceMatches)
-        ++inboundTlsSequenceAnomalies_;
-    if (inspection.layoutValid && inspection.hasSequence) {
-        inboundTlsSequenceKnown_ = true;
-        inboundTlsLastSequence_ = inspection.lastSequence;
-        inboundTlsRecordCount_ += inspection.recordCount;
     }
 
     if (tlsPlainScratch_.empty())
@@ -508,7 +471,7 @@ bool DirectSession::processDecryptedFrame(
         return true;
     }
 
-    // Match aasdks behavior for a stale/orphan fragments
+    // A continuation with no matching first fragment is dropped, as aasdk does.
     if (!fragment.active || fragment.messageBits != messageBits) {
         fragment = DecryptedFragment{};
         return true;
@@ -553,7 +516,7 @@ bool DirectSession::processDecryptedFrame(
 
 bool DirectSession::processDecryptedMessage(
     uint8_t channel,
-    uint8_t flags,
+    uint8_t /*flags*/,
     const uint8_t* data,
     size_t length,
     uint64_t rxFirstCompletedAtUs,
@@ -625,6 +588,12 @@ bool DirectSession::processDecryptedMessage(
     }
 
     if (messageId == VIDEO_FOCUS_REQUEST && channel == DIRECT_VIDEO_CHANNEL) {
+        // Mode 1 projected, 2 native (the user left Android Auto), 3 native transient,
+        // 4 projected without input focus; reason 1 phone screen off, 2 launch native,
+        // 3 last mode, 4 user selection.
+        vitaLog("direct-usb: phone asked for video focus mode=%u reason=%u",
+                readFirstVarintField(payloadData, payloadSize, 2, 0),
+                readFirstVarintField(payloadData, payloadSize, 3, 0));
         return sendEncrypted(
             channel,
             ENCRYPTED_SIGNAL_FLAGS,

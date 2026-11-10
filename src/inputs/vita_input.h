@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "inputs/input_events.h"
+
 namespace android_auto { class DirectSession; }
 
 namespace inputs {
@@ -27,6 +29,11 @@ bool sample();
 // IO thread owns the session and consumes queued events. Readiness should be atomic.
 void setReady(bool ready);
 bool drain(android_auto::DirectSession& session);
+// The same queue for a session that is not Android Auto: every event goes to the
+// sink in order (a run of moves is reduced to the latest). Stops and returns
+// false at the first event the sink refuses.
+using EventSink = bool (*)(const InputEvent& event);
+bool drainTo(EventSink sink);
 DeliveryStats deliveryStats();
 
 } // namespace inputs
