@@ -2,63 +2,6 @@
 
 namespace android_auto {
 
-uint64_t readBe64(const uint8_t* data)
-{
-    uint64_t value = 0;
-    for (unsigned index = 0; index < 8; ++index)
-        value = (value << 8) | data[index];
-    return value;
-}
-
-uint32_t tlsPayloadHash(const std::vector<uint8_t>& data)
-{
-    uint32_t hash = 2166136261u;
-    for (const uint8_t byte : data) {
-        hash ^= byte;
-        hash *= 16777619u;
-    }
-    return hash;
-}
-
-TlsRecordInspection inspectTlsRecords(const std::vector<uint8_t>& data)
-{
-    TlsRecordInspection result;
-    size_t offset = 0;
-
-    while (offset < data.size()) {
-        if (data.size() - offset < 5)
-            return result;
-
-        const uint8_t contentType = data[offset];
-        const uint16_t version =
-            (static_cast<uint16_t>(data[offset + 1]) << 8) |
-            static_cast<uint16_t>(data[offset + 2]);
-        const size_t recordLength =
-            (static_cast<size_t>(data[offset + 3]) << 8) |
-            static_cast<size_t>(data[offset + 4]);
-        if (contentType < 0x14 || contentType > 0x17 ||
-            version != 0x0303 || recordLength < 8 ||
-            recordLength > data.size() - offset - 5)
-        {
-            return result;
-        }
-
-        const uint64_t sequence = readBe64(data.data() + offset + 5);
-        if (!result.hasSequence) {
-            result.hasSequence = true;
-            result.firstSequence = sequence;
-        } else if (sequence != result.lastSequence + 1) {
-            result.internallyContiguous = false;
-        }
-        result.lastSequence = sequence;
-        ++result.recordCount;
-        offset += 5 + recordLength;
-    }
-
-    result.layoutValid = offset == data.size() && result.recordCount != 0;
-    return result;
-}
-
 void writeBe64(uint8_t* out, uint64_t value)
 {
     constexpr unsigned WIDTH = 8;
@@ -151,10 +94,10 @@ std::vector<uint8_t> avSetupOk(uint32_t maxUnacked)
     return out;
 }
 
-std::vector<uint8_t> videoFocus(bool unsolicited)
+std::vector<uint8_t> videoFocus(bool unsolicited, bool projected)
 {
     std::vector<uint8_t> out;
-    writeVarintField(out, 1, 1); // Field 1: focused/active.
+    writeVarintField(out, 1, projected ? 1 : 2); // Field 1: mode, 1 PROJECTED or 2 NATIVE.
     writeVarintField(out, 2, unsolicited ? 1 : 0); // Field 2: unsolicited indication flag.
     return out;
 }

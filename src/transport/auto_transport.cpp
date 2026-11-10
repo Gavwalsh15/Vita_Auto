@@ -11,7 +11,8 @@ constexpr uint32_t POLL_INTERVAL_US = 100000;
 AutoTransport::AutoTransport(const Options& options)
     : useUsb_(options.usb),
       useHeadunitServer_(options.headunitServer),
-      tcp_(options.wifiHostOverride)
+      tcp_(options.wifiHostOverride),
+      wireless_(options.wireless)
 {
 }
 
@@ -22,6 +23,10 @@ bool AutoTransport::closeLosers(Transport* winner)
         usbStopped = usb_.close() >= 0;
     if (winner != &tcp_)
         tcp_.close();
+    if (winner == &wireless_.transport())
+        wireless_.handOff();
+    else
+        wireless_.end();
     return usbStopped;
 }
 
@@ -32,19 +37,26 @@ bool AutoTransport::open(bool (*cancelled)())
     // The USB wake call is only safe once USB has actually connected.
     Transport::setWakeHandler(nullptr);
 
+    // A side that cannot even start (no USB plugin installed, no networking) is
+    // dropped; the others keep waiting. Only losing all of them is an error.
     bool usbWaiting = useUsb_ && usb_.beginOpen(cancelled);
     bool wifiWaiting = useHeadunitServer_ && tcp_.beginOpen(cancelled, false);
+    bool btWaiting = wireless_.enabled() && wireless_.begin(cancelled);
     if (useUsb_ && !usbWaiting)
         vitaLog("direct-auto: USB unavailable, continuing without it");
     if (useHeadunitServer_ && !wifiWaiting)
         vitaLog("direct-auto: Wi-Fi Headunit Server unavailable, continuing without it");
+    if (wireless_.enabled() && !btWaiting)
+        vitaLog("direct-auto: Bluetooth unavailable, continuing without it");
     if (cancelled())
         return false;
-    if (!usbWaiting && !wifiWaiting) {
+    if (!usbWaiting && !wifiWaiting && !btWaiting) {
         // Report the most specific error, USB first.
         if (useUsb_)
             return fail(usb_.lastAppError(), usb_.lastError());
-        return fail(tcp_.lastAppError(), tcp_.lastError());
+        if (useHeadunitServer_)
+            return fail(tcp_.lastAppError(), tcp_.lastError());
+        return fail(wireless_.lastAppError(), wireless_.lastError());
     }
 
     for (;;) {
@@ -63,7 +75,8 @@ bool AutoTransport::open(bool (*cancelled)())
             if (poll == OpenPoll::Failed) {
                 if (cancelled())
                     return false;
-                // report it
+                // A phone is plugged in but the handshake failed: report it
+                // rather than leave the user waiting on a cable problem.
                 fail(usb_.lastAppError(), usb_.lastError());
                 return false;
             }
@@ -88,6 +101,31 @@ bool AutoTransport::open(bool (*cancelled)())
             }
         }
 
+        if (btWaiting) {
+            switch (wireless_.poll(cancelled)) {
+            case WirelessBootstrap::Result::Connected:
+                vitaLog("direct-auto: phone connected after Bluetooth bootstrap");
+                if (!closeLosers(&wireless_.transport())) {
+                    fail(app::AppError::UsbStopFailed, -1);
+                    return false;
+                }
+                active_ = &wireless_.transport();
+                return true;
+            case WirelessBootstrap::Result::Failed:
+                if (cancelled())
+                    return false;
+                fail(wireless_.lastAppError(), wireless_.lastError());
+                return false;
+            case WirelessBootstrap::Result::Stopped:
+                btWaiting = false;
+                if (!usbWaiting && !wifiWaiting)
+                    return fail(app::AppError::NetNotConnected, -3);
+                break;
+            case WirelessBootstrap::Result::Waiting:
+                break;
+            }
+        }
+
         sceKernelDelayThread(POLL_INTERVAL_US);
     }
 }
@@ -95,6 +133,9 @@ bool AutoTransport::open(bool (*cancelled)())
 int AutoTransport::close()
 {
     active_ = nullptr;
+    // First, before anything else can end the app: the system panics if it
+    // exits with the access point up.
+    wireless_.end();
     const int usbResult = usb_.close();
     tcp_.close();
     if (usbResult < 0)

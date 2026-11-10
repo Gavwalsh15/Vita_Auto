@@ -95,10 +95,7 @@ static int startAndroidAutoVersionHandshake(int deviceId)
         return -1;
     }
 
-    /*
-     Keep this pipe separate from the Samsung identity's EP0 pipe. Its
-     delayed detach callback can arrive after 18d1:2d00 has attached.
-     */
+    // Separate from the Samsung identity's EP0 pipe: its delayed detach can arrive after 18d1:2d00 attaches.
     g_accessoryControlPipe = ksceUsbdOpenPipe(deviceId, NULL);
     if (g_accessoryControlPipe < 0) {
         ksceDebugPrintf(
@@ -118,11 +115,7 @@ static int startAndroidAutoVersionHandshake(int deviceId)
         return -1;
     }
 
-    /*
-     Do not start bulk I/O from inside SceUsbd's attach callback. Let the
-     accessory configuration settle, then mirror the proven PC sequence:
-     write VERSION_REQUEST first and arm the IN read after write completion.
-     */
+    // Don't start bulk I/O inside the attach callback: write VERSION_REQUEST first, arm the IN read after it completes.
     g_versionSettlePolls = 0;
     g_versionWriteCompleted = 0;
     g_versionRetryCount = 0;
@@ -258,11 +251,7 @@ static int handleUsbProbe(int deviceId)
         (!isAccessoryDevice(device) && !isSupportedAndroidVendor(device->idVendor)))
         return SCE_USBD_PROBE_FAILED;
 
-    /*
-     One phone at a time, except for the expected USB re-enumeration. The
-     Google accessory identity may be assigned a new SceUsbd device ID
-     before the Samsung identity's detach callback arrives.
-     */
+    // One phone at a time, except USB re-enumeration (the Google identity may get a new device ID first).
     if (g_usb.deviceId >= 0 && g_usb.deviceId != deviceId &&
         !(g_waitingForAccessory && isAccessoryDevice(device))) {
         return SCE_USBD_PROBE_FAILED;
@@ -372,9 +361,7 @@ static int usbAttach(int deviceId)
 static int usbDetach(int deviceId)
 {
     int result;
-    /* A transfer error can close admission before USBD delivers detach.
-     Detach must still release its pipes. Unregister owns callback lifetime;
-     count this callback even during Stop/module unload so it can be drained. */
+    // Count this callback even during Stop/unload so it can be drained; detach must still release its pipes.
     __sync_add_and_fetch(&g_operationGate, 1);
     result = handleUsbDetach(deviceId);
     leaveOperation();
@@ -388,13 +375,11 @@ static const SceUsbdDriver g_usbDriver = {
     .detach = usbDetach
 };
 
-/* Lifecycle operations run only on module/app threads, never USBD callbacks.
- A failed close/unregister/drain retains ownership and memory for a later retry. */
+// Lifecycle runs only on module/app threads, never USBD callbacks; a failed close/unregister/drain keeps ownership for retry.
 static int closePipe(SceUID *pipe)
 {
     int result;
-    /* Detach and Stop may both reach cleanup. Taking the handle first prevents
-     a second close, including from a callback invoked inline by ClosePipe. */
+    // Detach and Stop may both reach cleanup: take the handle first so ClosePipe can't close twice (even via an inline callback).
     const SceUID ownedPipe = __sync_lock_test_and_set(pipe, -1);
     if (ownedPipe < 0)
         return 0;
@@ -493,9 +478,7 @@ static int stopSession(void)
     }
     result = closeSessionPipes();
     if (result < 0 && g_driverRegistered) {
-        /* A disconnected device can leave a pipe that ClosePipe will not
-         accept. Unregister may run detach cleanup; retry the remaining
-         handles before deciding that the session must stay retained. */
+        // A disconnected device can leave a pipe ClosePipe rejects: retry the remaining handles before retaining the session.
         const int unregisterResult = ksceUsbdUnregisterDriver(&g_usbDriver);
         if (unregisterResult >= 0) {
             g_driverRegistered = 0;
@@ -505,7 +488,7 @@ static int stopSession(void)
     if (result < 0)
         return result;
 
-    /* No requests remain; unregister before releasing the host role. */
+    // No requests remain; unregister before releasing the host role.
     if (g_driverRegistered) {
         result = ksceUsbdUnregisterDriver(&g_usbDriver);
         if (result < 0) {

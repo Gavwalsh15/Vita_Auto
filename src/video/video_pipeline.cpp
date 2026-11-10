@@ -2,7 +2,6 @@
 #include "app/config.h"
 #include "logger/performance.h"
 #include "video/video_presenter.h"
-#include "android_auto/aa_direct.h"
 #include "logger/vita_log.h"
 #include "video/gxm_scaler.h"
 #include "video/h264_annexb.h"
@@ -78,71 +77,17 @@ constexpr int VIDEO_WORKER_STACK_SIZE = 0x20000;
 constexpr uint32_t VIDEO_QUEUE_WARNING_DEPTH = 8;
 constexpr uint32_t VIDEO_QUEUE_WARNING_STEP = 8;
 
-struct BasicH264AccessUnitKind {
-    bool hasSps = false;
-    bool hasPps = false;
-    bool hasIdr = false;
-};
-
 void queueVideoAccessUnit(PendingVideoAccessUnit pending, uint32_t sequence);
 
-BasicH264AccessUnitKind classifyH264AccessUnit(
-    const uint8_t* data,
-    size_t size)
-{
-    BasicH264AccessUnitKind kind{};
-
-    for (size_t i = 0; i + 4 < size;)
-    {
-        size_t startCodeSize = 0;
-        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
-            startCodeSize = 3;
-        else if (
-            i + 5 <= size &&
-            data[i] == 0 &&
-            data[i + 1] == 0 &&
-            data[i + 2] == 0 &&
-            data[i + 3] == 1)
-        {
-            startCodeSize = 4;
-        }
-
-        if (startCodeSize == 0)
-        {
-            ++i;
-            continue;
-        }
-
-        const size_t nalOffset = i + startCodeSize;
-        if (nalOffset >= size)
-            break;
-
-        const uint8_t nalType = data[nalOffset] & 0x1f;
-        if (nalType == 7)
-            kind.hasSps = true;
-        else if (nalType == 8)
-            kind.hasPps = true;
-        else if (nalType == 5)
-            kind.hasIdr = true;
-
-        i = nalOffset + 1;
-    }
-
-    return kind;
-}
-
 void acceptSessionMediaFrame(
-    const android_auto::MediaFrame& frame,
+    const Frame& frame,
     uint32_t& videoSequence,
     uint32_t& videoFrames,
     const char* logPrefix
 )
 {
-    if (frame.channel != android_auto::DIRECT_VIDEO_CHANNEL ||
-        frame.data == nullptr || frame.size == 0)
-    {
+    if (frame.data == nullptr || frame.size == 0)
         return;
-    }
 
     const uint64_t arrivalUs = performance::nowUs();
     if (frame.rxFirstCompletedAtUs != 0 &&
@@ -322,9 +267,6 @@ void queueVideoAccessUnit(PendingVideoAccessUnit pending, uint32_t sequence)
     if (!ensureVideoWorker())
         return;
 
-    const BasicH264AccessUnitKind kind =
-        classifyH264AccessUnit(pending.data.data(), pending.data.size());
-
     sceKernelLockMutex(g_videoMutex, 1, nullptr);
 
     // H.264 access units must reach the decoder in order
@@ -354,24 +296,23 @@ void queueVideoAccessUnit(PendingVideoAccessUnit pending, uint32_t sequence)
     if (newPeak)
         g_peakPendingVideoAccessUnits = queueDepth;
 
-    sceKernelUnlockMutex(g_videoMutex, 1);
-    sceKernelSignalSema(g_videoReadySema, 1);
-
     const bool queueWarning = newPeak &&
         queueDepth >= VIDEO_QUEUE_WARNING_DEPTH &&
         (g_lastLoggedQueuePeak == 0 ||
          queueDepth >= g_lastLoggedQueuePeak + VIDEO_QUEUE_WARNING_STEP);
+
+    sceKernelUnlockMutex(g_videoMutex, 1);
+    sceKernelSignalSema(g_videoReadySema, 1);
+
     if (queueWarning)
     {
         g_lastLoggedQueuePeak = queueDepth;
         vitaLog(
-            "video queue backlog seq=%u bytes=%u depth=%u peak=%u params=%u idr=%u",
+            "video queue backlog seq=%u bytes=%u depth=%u peak=%u",
             sequence,
             accessUnitBytes,
             queueDepth,
-            g_peakPendingVideoAccessUnits,
-            (kind.hasSps || kind.hasPps) ? 1 : 0,
-            kind.hasIdr ? 1 : 0
+            g_peakPendingVideoAccessUnits
         );
     }
 
@@ -419,6 +360,19 @@ void decodeVideoAccessUnit(
         g_h264Parser.inspectAccessUnit(accessUnit.data(), accessUnit.size());
     if (info.parsedSps)
         vitaLogInfo("H264 SPS profile=%u poc=%u", info.profile, info.pictureOrderType);
+    if (info.hasSps)
+    {
+        const video::SpsRewriteInfo sps = video::rewriteSpsForLowLatency(accessUnit);
+        vitaLogInfo(
+            "H264 SPS low-latency rewrite: vui=%u restriction=%u refs=%u rewritten=%u failed=%u skipped=%u",
+            sps.hadVui ? 1 : 0,
+            sps.hadRestriction ? 1 : 0,
+            sps.maxNumRefFrames,
+            sps.rewritten,
+            sps.failed,
+            sps.skipped
+        );
+    }
 
     const uint64_t decoderLockStartUs = performance::nowUs();
     if (g_decodedFrameMutex >= 0)
@@ -430,9 +384,10 @@ void decodeVideoAccessUnit(
         if (g_videoDecoder.init(info.width, info.height))
         {
             vitaLogInfo(
-                "H264 decoder init ok size=%ux%u",
+                "H264 decoder init ok size=%ux%u refs=%u",
                 info.width,
-                info.height
+                info.height,
+                g_videoDecoder.refFrames()
             );
         }
         else
@@ -488,7 +443,6 @@ void decodeVideoAccessUnit(
             );
             submitData = combinedAccessUnit.data();
             submitSize = combinedAccessUnit.size();
-            g_decoderSawIdr = true;
         }
 
         if (!g_videoDecoder.submitAccessUnit(submitData, submitSize))
@@ -509,6 +463,8 @@ void decodeVideoAccessUnit(
         else
         {
             g_decoderFailureLogs = 0;
+            if (info.hasIdr)
+                g_decoderSawIdr = true;
             producedFrame = g_videoDecoder.lastOutputCount() > 0;
             if (!g_loggedFirstDecodedFrame && producedFrame)
             {
@@ -711,7 +667,7 @@ void stopVideoWorker()
 
 } // namespace
 
-void acceptFrame(const android_auto::MediaFrame& frame,
+void acceptFrame(const Frame& frame,
                  uint32_t& sequence, uint32_t& frames, const char* logPrefix)
 {
     acceptSessionMediaFrame(frame, sequence, frames, logPrefix);

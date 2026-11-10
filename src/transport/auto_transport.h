@@ -2,14 +2,22 @@
 
 #include "transport/tcp_transport.h"
 #include "transport/usb_transport.h"
+#include "transport/wireless_bootstrap.h"
 
-
+// Waits for every enabled way a phone can show up at the same time and keeps
+// whichever connects first; the others are closed straight away, so nothing is
+// left half-started during the session:
+//   - a USB cable,
+//   - the phone's developer "Headunit Server" over Wi-Fi (the Vita dials it),
+//   - the wireless bootstrap: a paired phone is told over Bluetooth where the
+//     Vita listens, then connects to it (see WirelessBootstrap).
 class AutoTransport : public Transport {
 public:
     struct Options {
         const char* wifiHostOverride = "";
         bool usb = true;
         bool headunitServer = true;
+        WirelessConfig wireless;
     };
 
     explicit AutoTransport(const Options& options);
@@ -47,6 +55,7 @@ public:
             active_->logDiagnostics(reason);
     }
 
+    // After a connection the active side owns the error; before one, our own.
     app::AppError lastAppError() const override;
     int lastError() const override;
 
@@ -58,5 +67,6 @@ private:
     bool useHeadunitServer_;
     UsbTransport usb_;
     TcpTransport tcp_;       // dials the phone's Headunit Server
+    WirelessBootstrap wireless_;
     Transport* active_ = nullptr;
 };

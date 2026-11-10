@@ -15,7 +15,7 @@ constexpr uint32_t ALIGNMENT = 256 * 1024;
 constexpr uint32_t DECODER_ALIGNMENT = 1024 * 1024;
 constexpr uint32_t MAX_ES_BUFFER_SIZE = 512 * 1024;
 constexpr uint32_t INPUT_PADDING_SIZE = 64;
-constexpr uint32_t NUM_REF_FRAMES = 4;
+constexpr uint32_t REF_FRAME_CHOICES[] = {8, 6, 4};
 constexpr uint32_t NUM_STREAMS = 1;
 constexpr uint32_t RGBA_BYTES_PER_PIXEL = 4;
 
@@ -24,10 +24,12 @@ uint32_t alignUp(uint32_t value, uint32_t alignment)
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
-void setTimestampUnknown(SceVideodecTimeStamp& timestamp)
+constexpr uint64_t TIMESTAMP_STEP = 3000;
+
+void setTimestamp(SceVideodecTimeStamp& timestamp, uint64_t value)
 {
-    timestamp.upper = 0xFFFFFFFFu;
-    timestamp.lower = 0xFFFFFFFFu;
+    timestamp.upper = static_cast<uint32_t>(value >> 32);
+    timestamp.lower = static_cast<uint32_t>(value);
 }
 
 } // namespace
@@ -82,13 +84,23 @@ bool VitaH264Decoder::init(uint32_t width, uint32_t height)
     if (initialized_ && width_ == width && height_ == height)
         return true;
 
+    for (const uint32_t refFrames : REF_FRAME_CHOICES) {
+        if (tryInit(width, height, refFrames))
+            return true;
+    }
+    return false;
+}
+
+bool VitaH264Decoder::tryInit(uint32_t width, uint32_t height, uint32_t refFrames)
+{
     shutdown();
+    refFrames_ = refFrames;
     width_ = width;
     height_ = height;
     lastInitStage_ = 1;
 
     int result = sceSysmoduleLoadModule(SCE_SYSMODULE_AVCDEC);
-    if (result == SCE_SYSMODULE_ERROR_INVALID_VALUE) {
+    if (result == static_cast<int>(SCE_SYSMODULE_ERROR_INVALID_VALUE)) {
         // Some homebrew/runtime combinations reject the public AVCDEC
         // sysmodule ID even though SceVideodec stubs are linked. Continue and
         // let sceVideodecInitLibrary report the real decoder availability.
@@ -105,11 +117,11 @@ bool VitaH264Decoder::init(uint32_t width, uint32_t height)
     initInfo.size = sizeof(initInfo);
     initInfo.horizontal = alignUp(width, 16);
     initInfo.vertical = alignUp(height, 16);
-    initInfo.numOfRefFrames = NUM_REF_FRAMES;
+    initInfo.numOfRefFrames = refFrames;
     initInfo.numOfStreams = NUM_STREAMS;
 
     result = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, &initInfo);
-    if (result < 0 && result != SCE_VIDEODEC_ERROR_ALREADY_USED) {
+    if (result < 0 && result != static_cast<int>(SCE_VIDEODEC_ERROR_ALREADY_USED)) {
         lastError_ = result;
         return false;
     }
@@ -119,7 +131,7 @@ bool VitaH264Decoder::init(uint32_t width, uint32_t height)
     SceAvcdecQueryDecoderInfo query{};
     query.horizontal = initInfo.horizontal;
     query.vertical = initInfo.vertical;
-    query.numOfRefFrames = NUM_REF_FRAMES;
+    query.numOfRefFrames = refFrames;
 
     SceAvcdecDecoderInfo decoderInfo{};
     result = sceAvcdecQueryDecoderMemSize(
@@ -216,6 +228,7 @@ bool VitaH264Decoder::init(uint32_t width, uint32_t height)
     latestFrame_.pitch = app::config::SCREEN_WIDTH;
     latestFrame_.gpuMapped = pictureGpuMapped_;
     submittedAccessUnits_ = 0;
+    timestamp_ = 0;
     initialized_ = true;
     lastError_ = 0;
     lastInitStage_ = 9;
@@ -239,8 +252,9 @@ bool VitaH264Decoder::submitAccessUnit(const uint8_t* data, size_t size)
     );
 
     SceAvcdecAu au{};
-    setTimestampUnknown(au.pts);
-    setTimestampUnknown(au.dts);
+    timestamp_ += TIMESTAMP_STEP;
+    setTimestamp(au.pts, timestamp_);
+    setTimestamp(au.dts, timestamp_);
     au.es.pBuf = esMem_;
     au.es.size = static_cast<uint32_t>(size);
 
@@ -307,6 +321,7 @@ void VitaH264Decoder::shutdown()
     width_ = 0;
     height_ = 0;
     submittedAccessUnits_ = 0;
+    timestamp_ = 0;
     lastInitStage_ = 0;
 #if VITA_AUTO_VERBOSE_LOGGING
     outputPictures_ = 0;

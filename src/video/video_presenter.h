@@ -1,6 +1,7 @@
+
 #pragma once
 
-namespace video { struct DecodedFrame; }
+namespace video { struct DecodedFrame; struct ChoiceRow; }
 
 namespace video {
 namespace presenter {
@@ -12,8 +13,8 @@ bool shutdown();
 // Main-thread fallback, while the decoder's picture mutex is held.
 bool presentCpuFallback(const video::DecodedFrame& frame);
 // Main thread only, before streaming or after all session workers have joined.
-void presentStatus(const char* title, const char* detail, const char* error,
-                   const char* action, const char* audio);
+void presentStatus(const char* title, const char* detail, const char* note, const char* action,
+                   const video::ChoiceRow* rows, int rowCount);
 
 } // namespace presenter
 } // namespace video

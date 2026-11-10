@@ -33,6 +33,12 @@ target_link_libraries(vita_auto_usb_kernel PRIVATE
     SceSysmemForDriver_stub
     SceThreadmgrForDriver_stub
     SceKernelSuspendForDriver_stub
+    SceBtForDriver_stub
+    SceRegMgrForDriver_stub
+    SceSysclibForDriver_stub
+    SceModulemgrForKernel_363_stub
+    SceIofilemgrForDriver_stub
+    taihenForKernel_stub
 )
 
 vita_create_self(
@@ -78,6 +84,7 @@ target_link_options(vita_auto_usb_client PRIVATE
 target_link_libraries(vita_auto_usb_client PRIVATE
     vita_auto_usb_stub
     SceLibKernel_stub
+    SceNetPs_stub_weak
 )
 
 add_dependencies(vita_auto_usb_client

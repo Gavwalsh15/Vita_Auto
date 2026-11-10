@@ -1,17 +1,17 @@
-/*
-   USB host transport for Android Auto.
-
- SceUsbd callbacks negotiate accessory mode and complete transfers. The app
- advances the version handshake by polling GetState, then exchanges bytes
- through the exported syscalls. Start/Stop own a session module startup/unload
- own its storage. Retired requests drain before that storage is reused.
- */
+// USB host transport for Android Auto: SceUsbd callbacks negotiate accessory mode and complete transfers; the app
+// polls GetState for the handshake and moves bytes through the syscalls.
+#include <psp2kern/bt.h>
+#include <psp2kern/io/fcntl.h>
+#include <psp2kern/io/stat.h>
+#include <psp2kern/registrymgr.h>
 #include <psp2kern/kernel/debug.h>
 #include <psp2kern/kernel/cpu.h>
 #include <psp2kern/kernel/modulemgr.h>
 #include <psp2kern/kernel/suspend.h>
 #include <psp2kern/kernel/sysmem.h>
+#include <psp2kern/kernel/sysclib.h>
 #include <psp2kern/kernel/threadmgr.h>
+#include <taihen.h>
 #include <psp2kern/usbd.h>
 #include <psp2kern/usbserv.h>
 
@@ -39,8 +39,7 @@
 #define USB_STOP_TIMEOUT_US       1000000
 #define USB_STOP_POLL_US          1000
 
-/* High bits close admission low bits count code currently using the session.
-Diagnostics/wake remain available after Stop, until module unload begins. */
+// High bits close admission, low bits count code using the session; diagnostics/wake stay available after Stop until unload.
 #define USB_IO_CLOSED             0x80000000u
 #define USB_ALL_CLOSED            0x40000000u
 #define USB_OPERATION_COUNT       0x3fffffffu
@@ -52,11 +51,8 @@ Diagnostics/wake remain available after Stop, until module unload begins. */
 #define USB_PROTOCOL_MAX_RETRIES  6
 #define USB_PROTOCOL_SETTLE_POLLS 3
 #define USB_PROTOCOL_RETRY_POLLS  5
-/*
- Vita's host controller reliably completes endpoint-sized bulk reads. AA
- and TLS are byte streams, so larger records are reassembled above this
- layer. Keep enough packet slots to absorb bursts during decode/present.
- */
+// The host controller completes endpoint-sized bulk reads reliably; larger records are reassembled above. Keep enough
+// slots to absorb bursts.
 #define AA_BULK_READ_SLOT_SIZE    4096
 #define AA_BULK_READ_SLOT_COUNT   32
 #define AA_BULK_READ_PIPELINE_DEPTH 4
@@ -102,9 +98,7 @@ typedef struct UsbContext {
     SceUsbdDeviceRequest request;
 } UsbContext;
 
-/* Non-cacheable metadata shared by USB callbacks and the syscall reader.
-   Volatile accesses do not replace the barriers used when publishing data.
-*/
+// Non-cacheable metadata shared by USB callbacks and the syscall reader.
 typedef struct UsbBulkShared {
     volatile int readArmed;
     volatile int readHead;
@@ -131,8 +125,7 @@ typedef struct UsbBulkShared {
     uint64_t readCompletedAtUs[AA_BULK_READ_SLOT_COUNT];
 } UsbBulkShared;
 
-/* A completion may run before ksceUsbdBulkTransfer returns. SUBMITTING lets
- the scheduler avoid overwriting that completion with ACTIVE. */
+// A completion may run before ksceUsbdBulkTransfer returns: SUBMITTING stops the scheduler overwriting it with ACTIVE.
 enum BulkReadRequestState {
     BULK_READ_FREE = 0,
     BULK_READ_SUBMITTING,
@@ -162,11 +155,7 @@ static UsbContext g_usb = {
 
 static UsbBulkShared *g_bulkShared;
 static unsigned char (*g_bulkReadRing)[AA_BULK_READ_SLOT_SIZE];
-/*
- RX DMA, the cross-core RX ring, and TX DMA all live in one physically
- contiguous non-cacheable block.  This prevents the USB completion CPU and
- user-syscall CPU from observing different cached versions of a packet.
- */
+// RX DMA, the RX ring and TX DMA share one contiguous non-cacheable block so both cores see the same packet.
 static unsigned char (*g_bulkReadDmaBuffers)[AA_BULK_READ_SLOT_SIZE];
 static unsigned char *g_bulkWriteBuffer;
 static SceUID g_bulkDmaMemBlock = -1;
@@ -240,14 +229,30 @@ static void leaveOperation(void)
     __sync_sub_and_fetch(&g_operationGate, 1);
 }
 
+// Only the Bluetooth bootstrap takes a claim (it owns the RFCOMM stream); USB Start stays unclaimed so both
+// transports can wait for a phone at once.
+static volatile int g_activeTransport = VITA_AUTO_TRANSPORT_NONE;
+
+static int claimTransport(int transport)
+{
+    const int owner = __sync_val_compare_and_swap(
+        &g_activeTransport, VITA_AUTO_TRANSPORT_NONE, transport);
+    return owner == VITA_AUTO_TRANSPORT_NONE || owner == transport;
+}
+
+static void releaseTransport(int transport)
+{
+    __sync_bool_compare_and_swap(
+        &g_activeTransport, transport, VITA_AUTO_TRANSPORT_NONE);
+}
+
 static void wakeReader(void)
 {
     if (g_readEvent >= 0)
         ksceKernelSetEventFlag(g_readEvent, USB_EVENT_RX);
 }
 
-/* Retiring only closes admission. Request storage is kept until callbacks drain;
- a detach callback must never wait for other callbacks on the USBD thread. */
+// Retiring only closes admission; request storage stays until callbacks drain (a detach callback must never wait on the USBD thread).
 static void retireSession(enum UsbState state)
 {
     __sync_fetch_and_or(&g_operationGate, USB_IO_CLOSED);
@@ -257,5 +262,8 @@ static void retireSession(enum UsbState state)
 }
 
 #include "vita_auto_usb_bulk.inc"
+#include "vita_auto_bt.inc"
+#include "vita_auto_bt_client.inc"
+#include "vita_auto_ap.inc"
 #include "vita_auto_usb_session.inc"
 #include "vita_auto_usb_syscalls.inc"

@@ -142,12 +142,12 @@ bool presentCpuFallback(const video::DecodedFrame& frame)
     return presentDecodedFrame(frame);
 }
 
-void presentStatus(const char* title, const char* detail, const char* error,
-                   const char* action, const char* audio)
+void presentStatus(const char* title, const char* detail, const char* note, const char* action,
+                   const video::ChoiceRow* rows, int rowCount)
 {
     if (!video::isGxmScalerReady())
         init();
-    video::drawStatusScreen(title, detail, error, action, audio);
+    video::drawStatusScreen(title, detail, note, action, rows, rowCount);
 }
 
 } // namespace presenter

@@ -59,6 +59,7 @@ add_executable(vita_auto
     src/android_auto/aa_tls.cpp
     src/android_auto/mbedtls_vita_platform.c
 
+    src/audio/aac_decoder.cpp
     src/audio/audio_output.cpp
     src/audio/audio_sink.cpp
     src/audio/microphone_input.cpp
@@ -71,8 +72,13 @@ add_executable(vita_auto
 
     src/transport/transport.cpp
     src/transport/auto_transport.cpp
+    src/transport/bt_bootstrap.cpp
+    src/transport/bt_stack.cpp
     src/transport/usb_transport.cpp
     src/transport/tcp_transport.cpp
+    src/transport/wifi_ap.cpp
+    src/transport/wireless_bootstrap.cpp
+    src/transport/wireless_status.cpp
     kernel/client/loader.c
 
     src/video/gxm_scaler.cpp
@@ -82,6 +88,45 @@ add_executable(vita_auto
     src/video/status_screen.cpp
     src/video/vita_h264_decoder.cpp
 )
+# Apple CarPlay (experimental). The iAP2 link, message framing and
+# authentication exchange come from the nbtplay core rather than being copied
+# here; point VITA_AUTO_CARPLAY_CORE at its src/ folder. Without it the app
+# still builds and the carplay setting just reports that the core is missing.
+# No accessory identity is part of either project (docs/carplay.md).
+set(VITA_AUTO_CARPLAY_CORE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../beamer-dreamer/nbtplay/src"
+    CACHE PATH "Path to nbtplay's src/ folder (iap2_link, iap2_csm, iap2_auth, auth)")
+target_sources(vita_auto PRIVATE src/carplay/carplay_bootstrap.cpp)
+set(_vita_auto_carplay 0)
+if(EXISTS "${VITA_AUTO_CARPLAY_CORE}/iap2_link.cpp" AND EXISTS "${VITA_AUTO_CARPLAY_CORE}/rt.h")
+    set(_vita_auto_carplay 1)
+    set(_carplay_core_sources)
+    foreach(_name iap2_link iap2_csm iap2_auth auth
+                  airplay bplist rtsp pairing srp crypto media screen audio timing events)
+        list(APPEND _carplay_core_sources "${VITA_AUTO_CARPLAY_CORE}/${_name}.cpp")
+    endforeach()
+    set(_carplay_glue_sources
+        src/carplay/iap2_endpoint.cpp
+        src/carplay/mfi_authenticator.cpp
+        src/carplay/airplay_control.cpp
+        src/carplay/bonjour.cpp
+        src/carplay/carplay_session.cpp
+        src/carplay/carplay_media.cpp
+        src/carplay/carplay_input.cpp
+        src/carplay/carplay_sockets.cpp)
+    target_sources(vita_auto PRIVATE ${_carplay_core_sources} ${_carplay_glue_sources})
+    # Only these files see the core's headers, whose names (auth.h, audio.h, ...)
+    # are not prefixed the way this project's are.
+    set_source_files_properties(
+        ${_carplay_core_sources} ${_carplay_glue_sources} src/carplay/carplay_bootstrap.cpp
+        PROPERTIES INCLUDE_DIRECTORIES "${VITA_AUTO_CARPLAY_CORE}")
+    message(STATUS "CarPlay core: ${VITA_AUTO_CARPLAY_CORE}")
+else()
+    message(STATUS "CarPlay core not found at ${VITA_AUTO_CARPLAY_CORE}; carplay setting disabled")
+endif()
+set_source_files_properties(src/carplay/carplay_bootstrap.cpp
+    PROPERTIES COMPILE_DEFINITIONS "VITA_AUTO_CARPLAY=${_vita_auto_carplay}")
+
 # Failure logging is always available. Optional diagnostics are build choices.
 target_compile_definitions(vita_auto PRIVATE
     VITA_AUTO_VERBOSE_LOGGING=$<BOOL:${VITA_AUTO_VERBOSE_LOGGING}>
@@ -119,6 +164,7 @@ target_link_libraries(vita_auto PRIVATE
     SceSysmem_stub
     SceSysmodule_stub
     SceVideodec_stub
+    SceAudiodec_stub
     SceAudio_stub
     SceAudioIn_stub
     SceTouch_stub
@@ -158,9 +204,12 @@ target_sources(vita_auto PRIVATE
     "${VITA2D_DIR}/shader/compiled/texture_v_gxp.o"
 )
 
+# Unsafe: the Vita's own access point runs a DHCP server, and the system only
+# lets unsafe apps bind ports below 1024 (port 67).
 vita_create_self(
     vita_auto.self
     vita_auto
+    UNSAFE
 )
 
 vita_create_vpk(

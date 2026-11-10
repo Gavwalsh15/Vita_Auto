@@ -74,6 +74,9 @@ enum class AppError : int {
     NetWriteTimedOut = 1906,
     NetReadFailed = 1907,
     NetPeerClosed = 1908,
+
+    CarplayStartFailed = 2001,
+    WifiApFailed = 2002,
 };
 
 inline const char* appErrorName(AppError error)
@@ -139,6 +142,8 @@ inline const char* appErrorName(AppError error)
     case AppError::NetWriteTimedOut: return "NetWriteTimedOut";
     case AppError::NetReadFailed: return "NetReadFailed";
     case AppError::NetPeerClosed: return "NetPeerClosed";
+    case AppError::CarplayStartFailed: return "CarplayStartFailed";
+    case AppError::WifiApFailed: return "WifiApFailed";
     }
     return "UnknownAppError";
 }
