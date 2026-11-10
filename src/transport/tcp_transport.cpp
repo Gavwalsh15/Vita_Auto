@@ -10,9 +10,11 @@
 #include <cstring>
 
 #include "logger/vita_log.h"
+#include "transport/net_socket.h"
 
 namespace {
 
+// Android Auto's "Headunit Server" listens here on the phone.
 constexpr uint16_t HEADUNIT_SERVER_PORT = 5277;
 // Socket buffers come out of this pool, so it has to be bigger than the buffers.
 constexpr int NET_POOL_SIZE = 1024 * 1024;
@@ -26,12 +28,15 @@ constexpr uint64_t GAP_LOG_INTERVAL_US = 500000;
 constexpr uint64_t CONNECT_ATTEMPT_US = 3000000;
 constexpr uint64_t CONNECT_RETRY_DELAY_US = 1000000;
 constexpr uint64_t WIFI_CHECK_INTERVAL_US = 1000000;
-constexpr uint32_t POLL_INTERVAL_US = 100000;
+// Short but non-zero: a zero timeout may mean "wait forever" in some SDK calls.
 constexpr uint32_t CONNECT_POLL_WAIT_US = 1000;
 constexpr uint32_t RECEIVE_WAIT_US = 3000;
 constexpr uint32_t WRITE_RETRY_INTERVAL_US = 500;
 constexpr uint32_t WRITE_TIMEOUT_US = 2000000;
 
+// Auto mode runs a dialling and a listening transport side by side, and the
+// SDK network stack is process-wide, so it is initialised once and shared.
+// Every user is the IO owner thread, so no locking is needed.
 int g_netUsers = 0;
 bool g_moduleLoaded = false;
 bool g_netInited = false;
@@ -56,6 +61,7 @@ void shutdownNetwork()
     g_netPool = nullptr;
 }
 
+// Returns 0 or a negative SDK error.
 int startupNetwork()
 {
     int result = sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
@@ -84,7 +90,31 @@ int startupNetwork()
 
 } // namespace
 
-TcpTransport::TcpTransport(const char* hostOverride)
+namespace net_stack {
+
+int acquire()
+{
+    if (g_netUsers == 0) {
+        const int result = startupNetwork();
+        if (result < 0) {
+            shutdownNetwork();
+            return result;
+        }
+    }
+    ++g_netUsers;
+    return 0;
+}
+
+void release()
+{
+    if (g_netUsers > 0 && --g_netUsers == 0)
+        shutdownNetwork();
+}
+
+} // namespace net_stack
+
+TcpTransport::TcpTransport(const char* hostOverride, uint16_t listenPort)
+    : listenPort_(listenPort)
 {
     if (hostOverride != nullptr)
         std::snprintf(hostOverride_, sizeof(hostOverride_), "%s", hostOverride);
@@ -106,8 +136,17 @@ bool TcpTransport::initNetwork()
     return true;
 }
 
+void TcpTransport::useOwnAccessPoint(bool up)
+{
+    localNetwork_ = up && serverMode();
+    // Look again at once rather than at the next one-second check.
+    nextWifiCheckUs_ = 0;
+}
+
 app::AppError TcpTransport::lookupHost(int* detail)
 {
+    if (localNetwork_)
+        return app::AppError::None;
     int state = 0;
     const int stateResult = sceNetCtlInetGetState(&state);
     if (stateResult < 0 || state != SCE_NETCTL_STATE_CONNECTED) {
@@ -115,7 +154,11 @@ app::AppError TcpTransport::lookupHost(int* detail)
         return app::AppError::NetNotConnected;
     }
 
-    // IP still needs the Vita to be on some network.
+    // Listening needs the network but no phone address.
+    if (serverMode())
+        return app::AppError::None;
+
+    // An explicit IP still needs the Vita to be on some network.
     if (hostOverride_[0] != '\0') {
         std::snprintf(host_, sizeof(host_), "%s", hostOverride_);
         return app::AppError::None;
@@ -143,8 +186,17 @@ void TcpTransport::closeAttempt()
     }
 }
 
+void TcpTransport::closeListen()
+{
+    if (listenSocket_ >= 0) {
+        sceNetSocketClose(listenSocket_);
+        listenSocket_ = -1;
+    }
+}
+
 void TcpTransport::closeSocket()
 {
+    closeListen();
     closeAttempt();
     if (rxEpoll_ >= 0) {
         sceNetEpollDestroy(rxEpoll_);
@@ -159,13 +211,13 @@ void TcpTransport::closeSocket()
 void TcpTransport::abandonAttempt(uint64_t nowUs, const char* stage, int detail)
 {
     closeAttempt();
-    connectStage_ = stage;
-    connectDetail_ = detail;
     ++attempts_;
+    // Low volume: the first failure, then every fifth.
     if (attempts_ == 1 || attempts_ % 5 == 0)
         vitaLog("direct-wifi: attempt %u to %s failed stage=%s detail=0x%08x",
                 attempts_, host_, stage, static_cast<unsigned>(detail));
     nextAttemptUs_ = nowUs + CONNECT_RETRY_DELAY_US;
+    // The hotspot may have dropped; look again before the next attempt.
     int ignored = 0;
     wifiReady_ = lookupHost(&ignored) == app::AppError::None;
     nextWifiCheckUs_ = nowUs + WIFI_CHECK_INTERVAL_US;
@@ -173,6 +225,7 @@ void TcpTransport::abandonAttempt(uint64_t nowUs, const char* stage, int detail)
 
 OpenPoll TcpTransport::finishAttempt()
 {
+    // The connect epoll is spent; receive gets its own with the read events.
     rxEpoll_ = sceNetEpollCreate("vita_auto_rx", 0);
     if (rxEpoll_ < 0) {
         const int detail = rxEpoll_;
@@ -192,9 +245,51 @@ OpenPoll TcpTransport::finishAttempt()
         attemptEpoll_ = -1;
     }
     connected_ = true;
-    vitaLog("direct-wifi: connected to %s:%u after %u attempts",
-            host_, static_cast<unsigned>(HEADUNIT_SERVER_PORT), attempts_ + 1);
+    if (serverMode())
+        vitaLog("direct-wifi: phone connected to port %u", static_cast<unsigned>(listenPort_));
+    else
+        vitaLog("direct-wifi: connected to %s:%u after %u attempts",
+                host_, static_cast<unsigned>(HEADUNIT_SERVER_PORT), attempts_ + 1);
     return OpenPoll::Connected;
+}
+
+OpenPoll TcpTransport::pollListen(uint64_t nowUs)
+{
+    if (listenSocket_ < 0) {
+        if (nowUs < nextAttemptUs_)
+            return OpenPoll::Waiting;
+        const int sock = net_socket::listenTcp("vita_auto_listen", listenPort_, 1,
+                                               RECEIVE_BUFFER_SIZE, SEND_BUFFER_SIZE);
+        if (sock < 0) {
+            nextAttemptUs_ = nowUs + CONNECT_RETRY_DELAY_US;
+            return OpenPoll::Waiting;
+        }
+        listenSocket_ = sock;
+        vitaLog("direct-wifi: listening on port %u", static_cast<unsigned>(listenPort_));
+        return OpenPoll::Waiting;
+    }
+
+    SceNetSockaddrIn peer{};
+    unsigned int length = sizeof(peer);
+    const int accepted = sceNetAccept(
+        listenSocket_, reinterpret_cast<SceNetSockaddr*>(&peer), &length);
+    if (accepted == static_cast<int>(SCE_NET_ERROR_EAGAIN))
+        return OpenPoll::Waiting; // nobody has connected yet
+    if (accepted < 0) {
+        // The listener is broken (network reset, socket invalidated): drop it
+        // and open a fresh one after the usual retry delay.
+        vitaLog("direct-wifi: accept failed 0x%08x, listening again",
+                static_cast<unsigned>(accepted));
+        closeListen();
+        nextAttemptUs_ = nowUs + CONNECT_RETRY_DELAY_US;
+        return OpenPoll::Waiting;
+    }
+    const int one = 1;
+    sceNetSetsockopt(accepted, SCE_NET_SOL_SOCKET, SCE_NET_SO_NBIO, &one, sizeof(one));
+    sceNetSetsockopt(accepted, SCE_NET_IPPROTO_TCP, SCE_NET_TCP_NODELAY, &one, sizeof(one));
+    closeListen();
+    attemptSocket_ = accepted;
+    return finishAttempt();
 }
 
 OpenPoll TcpTransport::startAttempt(uint64_t nowUs)
@@ -214,16 +309,8 @@ OpenPoll TcpTransport::startAttempt(uint64_t nowUs)
         return OpenPoll::Waiting;
     }
     const int one = 1;
-    // Buffer sizes go on before connect so the window is advertised from the start.
-    const int receiveBuffer = RECEIVE_BUFFER_SIZE;
-    const int sendBuffer = SEND_BUFFER_SIZE;
-    const int rcvResult = sceNetSetsockopt(
-        sock, SCE_NET_SOL_SOCKET, SCE_NET_SO_RCVBUF, &receiveBuffer, sizeof(receiveBuffer));
-    const int sndResult = sceNetSetsockopt(
-        sock, SCE_NET_SOL_SOCKET, SCE_NET_SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));
-    if (rcvResult < 0 || sndResult < 0)
-        vitaLog("direct-wifi: socket buffer size not applied rcv=0x%08x snd=0x%08x",
-                static_cast<unsigned>(rcvResult), static_cast<unsigned>(sndResult));
+    if (!net_socket::setBuffers(sock, RECEIVE_BUFFER_SIZE, SEND_BUFFER_SIZE))
+        vitaLog("direct-wifi: socket buffer sizes not applied");
     sceNetSetsockopt(sock, SCE_NET_SOL_SOCKET, SCE_NET_SO_NBIO, &one, sizeof(one));
     sceNetSetsockopt(sock, SCE_NET_IPPROTO_TCP, SCE_NET_TCP_NODELAY, &one, sizeof(one));
     attemptSocket_ = sock;
@@ -232,7 +319,7 @@ OpenPoll TcpTransport::startAttempt(uint64_t nowUs)
         sock, reinterpret_cast<SceNetSockaddr*>(&addr), sizeof(addr));
     if (connectResult >= 0)
         return finishAttempt();
-    if (connectResult != SCE_NET_ERROR_EINPROGRESS) {
+    if (connectResult != static_cast<int>(SCE_NET_ERROR_EINPROGRESS)) {
         abandonAttempt(nowUs, "connect", connectResult);
         return OpenPoll::Waiting;
     }
@@ -252,7 +339,7 @@ OpenPoll TcpTransport::startAttempt(uint64_t nowUs)
     return OpenPoll::Waiting;
 }
 
-bool TcpTransport::beginOpen(bool (*cancelled)(), bool strict)
+bool TcpTransport::beginOpen(bool (*cancelled)())
 {
     clearError();
     sentBytes_ = 0;
@@ -271,8 +358,8 @@ bool TcpTransport::beginOpen(bool (*cancelled)(), bool strict)
     if (cancelled())
         return false;
 
-    vitaLog("direct-wifi: opening (connect port %u)",
-            static_cast<unsigned>(HEADUNIT_SERVER_PORT));
+    vitaLog("direct-wifi: opening (%s port %u)", serverMode() ? "listen" : "connect",
+            static_cast<unsigned>(serverMode() ? listenPort_ : HEADUNIT_SERVER_PORT));
     if (!initNetwork())
         return false;
 
@@ -281,8 +368,6 @@ bool TcpTransport::beginOpen(bool (*cancelled)(), bool strict)
     if (lookup == app::AppError::None) {
         wifiReady_ = true;
         vitaLog("direct-wifi: phone host %s", host_);
-    } else if (strict) {
-        return fail(lookup, detail);
     } else {
         vitaLog("direct-wifi: not on Wi-Fi yet; USB can still connect");
     }
@@ -306,6 +391,9 @@ OpenPoll TcpTransport::pollOpen(bool (*cancelled)())
         vitaLog("direct-wifi: phone host %s", host_);
     }
 
+    if (serverMode())
+        return pollListen(nowUs);
+
     if (attemptSocket_ < 0) {
         if (nowUs < nextAttemptUs_)
             return OpenPoll::Waiting;
@@ -324,21 +412,6 @@ OpenPoll TcpTransport::pollOpen(bool (*cancelled)())
         abandonAttempt(nowUs, "timeout", 0);
     }
     return OpenPoll::Waiting;
-}
-
-bool TcpTransport::open(bool (*cancelled)())
-{
-    if (!beginOpen(cancelled, true))
-        return false;
-    // Like USB, waiting for the phone has no time limit; cancellation ends it.
-    for (;;) {
-        const OpenPoll poll = pollOpen(cancelled);
-        if (poll == OpenPoll::Connected)
-            return true;
-        if (poll == OpenPoll::Failed)
-            return false;
-        sceKernelDelayThread(POLL_INTERVAL_US);
-    }
 }
 
 int TcpTransport::close()
@@ -368,7 +441,7 @@ bool TcpTransport::send(const uint8_t* data, size_t size)
             waitedUs = 0;
             continue;
         }
-        if (written != SCE_NET_ERROR_EAGAIN) {
+        if (written != static_cast<int>(SCE_NET_ERROR_EAGAIN)) {
             connected_ = false;
             return fail(app::AppError::NetWriteFailed, written);
         }
@@ -408,13 +481,13 @@ int TcpTransport::receive(std::vector<uint8_t>& data, UsbRxTiming* timing)
 
     uint8_t buffer[MAX_TRANSFER_SIZE];
     int received = sceNetRecv(socket_, buffer, sizeof(buffer), 0);
-    if (received == SCE_NET_ERROR_EAGAIN) {
+    if (received == static_cast<int>(SCE_NET_ERROR_EAGAIN)) {
         SceNetEpollEvent got{};
         // Doubles as the idle sleep; a timeout is not an error.
         if (sceNetEpollWait(rxEpoll_, &got, 1, RECEIVE_WAIT_US) <= 0)
             return 0;
         received = sceNetRecv(socket_, buffer, sizeof(buffer), 0);
-        if (received == SCE_NET_ERROR_EAGAIN)
+        if (received == static_cast<int>(SCE_NET_ERROR_EAGAIN))
             return 0;
     }
 

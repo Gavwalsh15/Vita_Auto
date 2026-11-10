@@ -59,8 +59,9 @@ add_executable(vita_auto
     src/android_auto/aa_tls.cpp
     src/android_auto/mbedtls_vita_platform.c
 
+    src/audio/aac_decoder.cpp
     src/audio/audio_output.cpp
-    src/audio/audio_sink.cpp
+    src/audio/audio_stream.cpp
     src/audio/microphone_input.cpp
 
     src/inputs/vita_controller_input.cpp
@@ -71,8 +72,15 @@ add_executable(vita_auto
 
     src/transport/transport.cpp
     src/transport/auto_transport.cpp
+    src/transport/bt_bootstrap.cpp
+    src/transport/bt_stack.cpp
     src/transport/usb_transport.cpp
+    src/transport/net_socket.cpp
+    src/transport/phone_network.cpp
     src/transport/tcp_transport.cpp
+    src/transport/wifi_ap.cpp
+    src/transport/wireless_bootstrap.cpp
+    src/transport/wireless_status.cpp
     kernel/client/loader.c
 
     src/video/gxm_scaler.cpp
@@ -82,6 +90,31 @@ add_executable(vita_auto
     src/video/status_screen.cpp
     src/video/vita_h264_decoder.cpp
 )
+target_sources(vita_auto PRIVATE
+    src/carplay/carplay_bootstrap.cpp
+    src/carplay/iap2_endpoint.cpp
+    src/carplay/mfi_authenticator.cpp
+    src/carplay/airplay_control.cpp
+    src/carplay/bonjour.cpp
+    src/carplay/carplay_session.cpp
+    src/carplay/carplay_media.cpp
+    src/carplay/carplay_input.cpp
+
+    src/carplay/core/audio.cpp
+    src/carplay/core/bplist.cpp
+    src/carplay/core/crypto.cpp
+    src/carplay/core/events.cpp
+    src/carplay/core/iap2_auth.cpp
+    src/carplay/core/iap2_csm.cpp
+    src/carplay/core/iap2_link.cpp
+    src/carplay/core/media.cpp
+    src/carplay/core/pairing.cpp
+    src/carplay/core/rtsp.cpp
+    src/carplay/core/screen.cpp
+    src/carplay/core/srp.cpp
+    src/carplay/core/timing.cpp
+)
+
 # Failure logging is always available. Optional diagnostics are build choices.
 target_compile_definitions(vita_auto PRIVATE
     VITA_AUTO_VERBOSE_LOGGING=$<BOOL:${VITA_AUTO_VERBOSE_LOGGING}>
@@ -119,6 +152,7 @@ target_link_libraries(vita_auto PRIVATE
     SceSysmem_stub
     SceSysmodule_stub
     SceVideodec_stub
+    SceAudiodec_stub
     SceAudio_stub
     SceAudioIn_stub
     SceTouch_stub
@@ -158,9 +192,12 @@ target_sources(vita_auto PRIVATE
     "${VITA2D_DIR}/shader/compiled/texture_v_gxp.o"
 )
 
+# Unsafe: the Vita's own access point runs a DHCP server, and the system only
+# lets unsafe apps bind ports below 1024 (port 67).
 vita_create_self(
     vita_auto.self
     vita_auto
+    UNSAFE
 )
 
 vita_create_vpk(

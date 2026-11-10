@@ -9,7 +9,6 @@
 #include <cstring>
  
 namespace {
-// Log Errors and stuff to see how far we are getting
 SceUID g_logFile = -1;
 
 void writeLogLine(const char* text, bool reset)

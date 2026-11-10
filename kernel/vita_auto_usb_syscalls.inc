@@ -33,8 +33,7 @@ int module_start(SceSize argc, const void *args)
     (void)argc;
     (void)args;
 
-    /* Loading the plugin prepares storage. The app explicitly acquires the USB
-     host role with Start, so a failed session start never unloads callback code. */
+    // Loading only prepares storage; the app takes the USB host role with Start, so a failed start never unloads callback code.
     result = allocateBulkMemory();
     if (result < 0)
         return result;
@@ -47,6 +46,9 @@ int module_start(SceSize argc, const void *args)
     }
     resetSession();
     __sync_lock_test_and_set(&g_operationGate, USB_IO_CLOSED);
+    // Bluetooth stays untouched until Enable; a failure setting up its event flags must not stop USB loading.
+    if (btInit() < 0)
+        ksceDebugPrintf("[VitaAutoBT] Event flags not created\n");
     if (ksceKernelRegisterSysEventHandler(
             "vita_auto_usb", usbSysEventHandler, NULL) >= 0)
         g_sysEventRegistered = 1;
@@ -62,7 +64,8 @@ int module_stop(SceSize argc, const void *args)
     (void)args;
     if (!__sync_bool_compare_and_swap(&g_lifecycleBusy, 0, 1))
         return SCE_KERNEL_STOP_FAIL;
-    if (g_sysEventRegistered) {
+    // Never unload while the app has Bluetooth enabled or the AP hooked.
+    if (g_sysEventRegistered || btIsActive() || apIsActive()) {
         __sync_lock_release(&g_lifecycleBusy);
         return SCE_KERNEL_STOP_FAIL;
     }
@@ -213,9 +216,7 @@ static int usbGetLastFailureCount(void)
     return g_lastFailureCount;
 }
 
-/* One syscall reader owns the tail. Copy only complete ring slots from a fixed
- head snapshot, then release them after all selected copies succeed. Metadata
- is a kernel pointer here; exported timed reads copy it to user space below. */
+// One reader owns the tail: copy complete slots from a head snapshot, release them after all copies succeed.
 static int readBulkInternal(
     void *userBuffer,
     uint32_t capacity,
@@ -349,8 +350,7 @@ static int readBulkTimed(
     return result;
 }
 
-/* Events are wake hints, not packet counts. After a wake or timeout the caller
- checks the ring again; Wake is also allowed to interrupt an empty read. */
+// Events are wake hints, not counts: recheck the ring after a wake or timeout. Wake may interrupt an empty read.
 static void waitForBulkReadEvent(uint32_t timeoutUs)
 {
     SceUInt timeout = timeoutUs;
@@ -365,8 +365,7 @@ static void waitForBulkReadEvent(uint32_t timeoutUs)
     );
 }
 
-/* Hold admission through the event wait: Stop wakes us and waits for us to
- leave before closing pipes. The second read sees retirement and returns -1. */
+// Hold admission through the wait: Stop wakes us and waits for us to leave before closing pipes; the second read sees retirement (-1).
 static int readBulkWait(
     void *userBuffer, uint32_t capacity, uint32_t timeoutUs,
     VitaAutoUsbReadMetadata *userMetadata)
@@ -416,7 +415,7 @@ static int copyRxDiagnostics(VitaAutoUsbRxDiagnostics *userDiagnostics)
     diagnostics.completedTransfers = g_bulkShared->readCompleteCount;
     diagnostics.publishedPackets = g_bulkShared->readPublishedCount;
     diagnostics.consumedPackets = g_bulkShared->readConsumedCount;
-    diagnostics.overflowCount = 0; /* Retained ABI field; capacity is reserved. */
+    diagnostics.overflowCount = 0; // Retained ABI field; capacity is reserved.
     diagnostics.checksumFailures = g_bulkShared->readChecksumFailures;
     diagnostics.sequenceFailures = g_bulkShared->readSequenceFailures;
     diagnostics.maxRingDepth = g_bulkShared->readMaxDepth;
@@ -493,9 +492,7 @@ static int usbWrite(const void *userBuffer, uint32_t length)
     return result;
 }
 
-/* Vita syscall boundary. SDK services must run with the kernel thread-state
- guard, especially Stop's pipe operations and waits. Module entry points and
- USBD callbacks are already kernel calls and use the internal helpers above. */
+// Syscall boundary: SDK services need the kernel thread-state guard; internal entry points and callbacks use the helpers above.
 
 static int usbDrainReads(void)
 {
@@ -679,3 +676,174 @@ int ksceVitaAutoUsbWrite(const void *userBuffer, uint32_t length)
     EXIT_SYSCALL(syscallState);
     return result;
 }
+
+int ksceVitaAutoBtStart(void)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btStart();
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtStop(void)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btStop();
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtReadWaitTimed(void *userBuffer, uint32_t capacity, uint32_t timeoutUs)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btReadWaitTimed(userBuffer, capacity, timeoutUs);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtWrite(const void *userBuffer, uint32_t length)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btWrite(userBuffer, length);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtGetInfo(VitaAutoBtInfo *userInfo)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btGetInfo(userInfo);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtEnable(void)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btEnable();
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtDisable(void)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btDisable();
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtReadEvents(VitaAutoBtEvent *userEvents, uint32_t maxEvents)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btReadEvents(userEvents, maxEvents);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtConfigureName(const char *wanted, const char *recoverOriginal)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btConfigureName(wanted, recoverOriginal);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtGetOriginalName(char *buffer, uint32_t size)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btGetOriginalName(buffer, size);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtDisconnect(uint32_t mac0, uint32_t mac1)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btDisconnect(mac0, mac1);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtConnectState(uint32_t mac0, uint32_t mac1)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btConnectState(mac0, mac1);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoBtSetOptions(uint32_t flags)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = btSetOptions(flags);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoApStart(const VitaAutoApConfig *config)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = apStart(config);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoApStop(void)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = apStop();
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoApKeepAlive(void)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = apKeepAlive();
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+
+int ksceVitaAutoApGetInfo(VitaAutoApInfo *userInfo)
+{
+    int syscallState;
+    int result;
+    ENTER_SYSCALL(syscallState);
+    result = apGetInfo(userInfo);
+    EXIT_SYSCALL(syscallState);
+    return result;
+}
+

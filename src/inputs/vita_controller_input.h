@@ -8,6 +8,7 @@ using ButtonSender = bool (*)(const ButtonEvent& event);
 
 void initControllerInput();
 void stopControllerInput();
+void resyncControllerInput();
 void pollControllerInput(ButtonSender sender);
 
 } // namespace inputs

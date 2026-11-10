@@ -8,11 +8,9 @@
 #include "android_auto/aa_errors.h"
 
 namespace android_auto {
-// Open Auto Stuff 
 constexpr uint8_t CONTROL_CHANNEL = 0;
 constexpr uint8_t PLAINTEXT_CONTROL_FLAGS = 0x03;
 constexpr uint8_t ENCRYPTED = 0x08;
-// Android Auto 1.7 as it is the lastest and easist by the looks
 constexpr uint16_t VERSION_REQUEST = 1;
 constexpr uint16_t VERSION_RESPONSE = 2;
 constexpr uint16_t VERSION_STATUS_MATCH = 0;
@@ -76,7 +74,7 @@ private:
     size_t failureBufferedSize_ = 0;
     std::array<uint8_t, 16> failureHead_{};
 
-    void fail(FrameParseError errorCode);
+    void fail(FrameParseError errorCode, size_t offset);
 };
 
 }

@@ -2,7 +2,7 @@
 
 #include "transport/tcp_transport.h"
 #include "transport/usb_transport.h"
-
+#include "transport/wireless_bootstrap.h"
 
 class AutoTransport : public Transport {
 public:
@@ -10,12 +10,13 @@ public:
         const char* wifiHostOverride = "";
         bool usb = true;
         bool headunitServer = true;
+        WirelessConfig wireless;
     };
 
     explicit AutoTransport(const Options& options);
     ~AutoTransport() override { close(); }
 
-    bool open(bool (*cancelled)()) override;
+    bool open(bool (*cancelled)());
     int close() override;
     bool send(const uint8_t* data, size_t size) override;
     int receive(
@@ -51,12 +52,12 @@ public:
     int lastError() const override;
 
 private:
-    // Closes everything except the winner. False if the USB stop failed.
     bool closeLosers(Transport* winner);
 
     bool useUsb_;
     bool useHeadunitServer_;
     UsbTransport usb_;
     TcpTransport tcp_;       // dials the phone's Headunit Server
+    WirelessBootstrap wireless_;
     Transport* active_ = nullptr;
 };

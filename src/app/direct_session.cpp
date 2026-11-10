@@ -1,27 +1,29 @@
 #include "app/direct_session.h"
-#include "audio/audio_sink.h"
 #include "app/config.h"
+#include "app/session_watch.h"
 #include "inputs/vita_input.h"
 #include "logger/performance.h"
+#include "video/input_mark.h"
 #include "video/video_pipeline.h"
 #include "android_auto/aa_direct.h"
-#include "audio/audio_output.h"
+#include "audio/audio_stream.h"
 #include "audio/microphone_input.h"
+#include "carplay/carplay_bootstrap.h"
 #include "logger/vita_log.h"
 #include "transport/auto_transport.h"
-#include "transport/tcp_transport.h"
-#include "transport/usb_transport.h"
 
 #include <psp2/kernel/threadmgr.h>
 #include <algorithm>
 #include <cstdio>
+#include <memory>
+#include <vector>
+
 namespace app {
 namespace direct_session {
 namespace performance = logger::performance;
 
 namespace {
 
-// Only this thread touches transport and TLS state. Input arrives via its queue.
 constexpr uint64_t ANDROID_AUTO_START_TIMEOUT_US = 60 * 1000 * 1000;
 constexpr uint64_t SHUTDOWN_DRAIN_TIMEOUT_US = 500000;
 constexpr uint64_t SHUTDOWN_PING_INTERVAL_US = 50000;
@@ -30,9 +32,7 @@ constexpr int DIRECT_USB_THREAD_PRIORITY = 0x10000100;
 constexpr int DIRECT_USB_THREAD_STACK_SIZE = 0x40000;
 static SceUID g_directUsbThread = -1;
 // Set before the IO thread starts and kept fixed until it has joined.
-static bool g_audioOnVita = true;
-static ConnectionMode g_mode = ConnectionMode::Auto;
-static char g_host[40] = {};
+static Settings g_settings;
 static volatile uint32_t g_directIoFinished = 0;
 static volatile int g_directIoError = static_cast<int>(AppError::None);
 static volatile int g_directIoErrorDetail = 0;
@@ -116,7 +116,7 @@ bool drainReadsBeforeShutdown(
     uint64_t nextPingUs = 0;
     std::vector<uint8_t> discarded;
     TransportDrainState diagnostics{};
-    while (sceKernelGetSystemTimeWide() < deadlineUs) {
+    while (static_cast<uint64_t>(sceKernelGetSystemTimeWide()) < deadlineUs) {
         if (transport.shutdownDrainState(diagnostics) < 0)
             break;
         if (diagnostics.readsArmed == 0) {
@@ -141,32 +141,51 @@ bool drainReadsBeforeShutdown(
     return false;
 }
 
+// CarPlay waits for a phone for as long as it takes, so there is no start timeout;
+// a failed decoder still ends the session.
+bool carplayShouldStop()
+{
+    if (stopRequested())
+        return true;
+    const SessionWatch::Verdict verdict = SessionWatch{}.check(sceKernelGetSystemTimeWide());
+    recordAppError(verdict.error, verdict.detail);
+    return verdict.error != AppError::None;
+}
+
+int runCarplay()
+{
+    carplay::Config config;
+    config.wireless = g_settings.wireless;
+    config.audioOffer = g_settings.carplayAudio;
+    vitaLog("session: carplay");
+    const AppError result = carplay::run(config, &carplayShouldStop);
+    recordAppError(result);
+    return result == AppError::None ? 0 : 1;
+}
+
 int runDirectSession()
 {
-    std::unique_ptr<Transport> transportOwner;
-    switch (g_mode) {
-    case ConnectionMode::Wireless:
-    case ConnectionMode::Auto: {
-        AutoTransport::Options options;
-        options.wifiHostOverride = g_host;
-        options.usb = g_mode == ConnectionMode::Auto;
-        transportOwner.reset(new AutoTransport(options));
-        break;
-    }
-    case ConnectionMode::Usb:
-        transportOwner.reset(new UsbTransport());
-        break;
-    }
-    Transport& transport = *transportOwner;
-    vitaLog("session: connection=%s", connectionModeName(g_mode));
-    android_auto::DirectSession session(g_audioOnVita);
+    if (g_settings.carplay)
+        return runCarplay();
+    AutoTransport::Options options;
+    options.wifiHostOverride = g_settings.host;
+    options.usb = g_settings.connection != ConnectionMode::Wireless;
+    options.headunitServer = g_settings.connection != ConnectionMode::Usb;
+    options.wireless = g_settings.wireless;
+    if (g_settings.connection == ConnectionMode::Usb)
+        options.wireless.bluetooth = false;
+    std::unique_ptr<AutoTransport> transportOwner(new AutoTransport(options));
+    AutoTransport& transport = *transportOwner;
+    vitaLog("session: connection=%s", connectionModeName(g_settings.connection));
+    android_auto::DirectSession session(g_settings.audioOnVita);
     // Deep enough to ride out the 100-200 ms Wi-Fi stalls; music and
     // navigation prompts are not latency sensitive.
-    audio::Output mediaAudioOutput(48000, 2, 400);
-    // share the same advertised 16 kHz mono format.
-    audio::Output promptAudioOutput(16000, 1, 250);
+    audio::Stream mediaAudio("media");
+    mediaAudio.configure(audio::Encoding::Pcm16Le, 48000, 2, 400);
+    // Guidance and system sounds share the 16 kHz mono format advertised for both.
+    audio::Stream promptAudio("prompts");
+    promptAudio.configure(audio::Encoding::Pcm16Le, 16000, 1, 250);
     audio::MicrophoneInput microphoneInput(&Transport::wake);
-    audio::sink::AudioSinkStats audioStats{};
     uint32_t videoSequence = 0;
     uint32_t videoFrames = 0;
     performance::Reporter perfReporter{};
@@ -190,16 +209,27 @@ int runDirectSession()
     session.setMediaMaxUnacked(transport.mediaMaxUnacked());
     session.setMediaHandler(
         [&](const android_auto::MediaFrame& frame) {
-            if (audio::sink::acceptFrame(
-                    frame,
-                    mediaAudioOutput,
-                    promptAudioOutput,
-                    audioStats))
-            {
+            if (frame.channel == android_auto::DIRECT_MEDIA_AUDIO_CHANNEL) {
+                mediaAudio.push(frame.data, frame.size);
                 return;
             }
+            if (frame.channel == android_auto::DIRECT_GUIDANCE_AUDIO_CHANNEL ||
+                frame.channel == android_auto::DIRECT_SYSTEM_AUDIO_CHANNEL)
+            {
+                promptAudio.push(frame.data, frame.size);
+                return;
+            }
+            if (frame.channel != android_auto::DIRECT_VIDEO_CHANNEL)
+                return;
+            video::pipeline::Frame video;
+            video.timestamp = frame.timestamp;
+            video.rxFirstCompletedAtUs = frame.rxFirstCompletedAtUs;
+            video.rxLastCompletedAtUs = frame.rxLastCompletedAtUs;
+            video.parsedAtUs = frame.parsedAtUs;
+            video.data = frame.data;
+            video.size = frame.size;
             video::pipeline::acceptFrame(
-                frame,
+                video,
                 videoSequence,
                 videoFrames,
                 "direct-usb"
@@ -252,22 +282,92 @@ int runDirectSession()
     };
 
     const uint64_t sessionStartedAtUs = sceKernelGetSystemTimeWide();
+    const SessionWatch watch{sessionStartedAtUs, ANDROID_AUTO_START_TIMEOUT_US,
+                             AppError::AndroidAutoStartTimedOut};
+    // The phone sends no video while nothing on screen changes, and sometimes stops
+    // for good with the link still live. Like open-headunit: once frames have been
+    // missing for a while, ask for video focus; if that does not bring them back and
+    // the user is touching a screen that does not update, release focus and retake
+    // it, which makes the phone restart its video with a keyframe. open-headunit
+    // measured the plain request as having no effect and the cycle as the one thing
+    // that works, and spaces the release and the regain so the phone sees two events.
+    constexpr uint64_t VIDEO_IDLE_US = 10000000;
+    constexpr uint64_t VIDEO_FOCUS_RETRY_US = 2000000;
+    constexpr uint64_t VIDEO_CYCLE_AFTER_US = 12000000;
+    constexpr uint64_t VIDEO_CYCLE_GAP_US = 400000;
+    constexpr uint64_t VIDEO_CYCLE_COOLDOWN_US = 60000000;
+    constexpr uint32_t VIDEO_CYCLES_PER_SESSION = 3;
+    uint32_t idleCheckFrames = 0;
+    uint64_t lastVideoFrameUs = sessionStartedAtUs;
+    uint64_t lastFocusRequestUs = 0;
+    uint32_t focusRequestsThisIdle = 0;
+    uint32_t inputAtLastFrame = 0;
+    uint32_t focusCycles = 0;
+    video::InputMark inputMark;
+    uint64_t lastFocusCycleUs = 0;
+    uint64_t focusRegainAtUs = 0;
     while (!stopRequested() && transport.connected() &&
            session.state() != android_auto::DirectState::Error)
     {
-        const video::pipeline::Failure videoFailure = video::pipeline::failure();
-        if (videoFailure.error != AppError::None) {
-            recordAppError(videoFailure.error, videoFailure.detail);
+        const uint64_t loopNowUs = sceKernelGetSystemTimeWide();
+        const SessionWatch::Verdict verdict = watch.check(loopNowUs);
+        if (verdict.error != AppError::None) {
+            recordAppError(verdict.error, verdict.detail);
             break;
         }
-        if (!video::pipeline::hasPresentedFrame() &&
-            sceKernelGetSystemTimeWide() - sessionStartedAtUs >=
-                ANDROID_AUTO_START_TIMEOUT_US)
+        if (focusRegainAtUs != 0 && loopNowUs >= focusRegainAtUs) {
+            focusRegainAtUs = 0;
+            vitaLog("direct-usb: retaking video focus to finish the cycle");
+            if (!session.sendVideoFocus(true)) {
+                recordAppError(AppError::AndroidAutoSessionFailed, session.lastError());
+                vitaLog("direct-usb: video focus request failed");
+                break;
+            }
+        }
+        const uint32_t inputDelivered = inputs::deliveryStats().delivered;
+        const uint64_t videoIdleUs = loopNowUs - lastVideoFrameUs;
+        if (videoFrames != idleCheckFrames) {
+            if (focusRequestsThisIdle != 0)
+                vitaLog("direct-usb: video resumed after %u focus request(s)",
+                        focusRequestsThisIdle);
+            idleCheckFrames = videoFrames;
+            lastVideoFrameUs = loopNowUs;
+            focusRequestsThisIdle = 0;
+            inputAtLastFrame = inputDelivered;
+        } else if (video::pipeline::hasPresentedFrame() && focusRegainAtUs == 0 &&
+                   videoIdleUs >= VIDEO_IDLE_US)
         {
-            recordAppError(AppError::AndroidAutoStartTimedOut);
-            break;
+            if (videoIdleUs >= VIDEO_CYCLE_AFTER_US && inputDelivered != inputAtLastFrame &&
+                focusCycles < VIDEO_CYCLES_PER_SESSION &&
+                (lastFocusCycleUs == 0 ||
+                 loopNowUs - lastFocusCycleUs >= VIDEO_CYCLE_COOLDOWN_US))
+            {
+                ++focusCycles;
+                ++focusRequestsThisIdle;
+                lastFocusCycleUs = loopNowUs;
+                focusRegainAtUs = loopNowUs + VIDEO_CYCLE_GAP_US;
+                vitaLog("direct-usb: no video for %u ms after touch input; cycling video focus (%u/%u)",
+                        static_cast<unsigned>(videoIdleUs / 1000), focusCycles,
+                        VIDEO_CYCLES_PER_SESSION);
+                if (!session.sendVideoFocus(false)) {
+                    recordAppError(AppError::AndroidAutoSessionFailed, session.lastError());
+                    vitaLog("direct-usb: video focus release failed");
+                    break;
+                }
+            } else if (loopNowUs - lastFocusRequestUs >= VIDEO_FOCUS_RETRY_US) {
+                if (focusRequestsThisIdle == 0)
+                    vitaLog("direct-usb: no video for %u ms with the link up; requesting video focus",
+                            static_cast<unsigned>(videoIdleUs / 1000));
+                lastFocusRequestUs = loopNowUs;
+                ++focusRequestsThisIdle;
+                if (!session.sendVideoFocus()) {
+                    recordAppError(AppError::AndroidAutoSessionFailed, session.lastError());
+                    vitaLog("direct-usb: video focus request failed");
+                    break;
+                }
+            }
         }
-        const uint32_t inputDeliveredBefore = inputs::deliveryStats().delivered;
+        inputMark.begin();
         inputs::setReady(session.inputReady());
 
         if (!syncMicrophoneCapture() || !drainMicrophoneFrames()) {
@@ -286,8 +386,7 @@ int runDirectSession()
             vitaLog("direct-usb: input write failed");
             break;
         }
-        if (inputs::deliveryStats().delivered != inputDeliveredBefore)
-            video::pipeline::noteInputSubmitted(performance::nowUs());
+        inputMark.end();
 
         const uint64_t receiveStartUs = performance::nowUs();
         UsbRxTiming rxTiming{};
@@ -372,8 +471,7 @@ int runDirectSession()
             break;
         }
 
-        /* Flush media ACKs and protocol responses produced by session.feed
-         Touch was already sent at the start of this iteration. */
+        // Flush media ACKs and protocol responses from session.feed; touch was sent at the start of this iteration.
         if (!flushDirectSessionOutbound(transport, session)) {
             recordAppError(transport.lastAppError(), transport.lastError());
             vitaLog("direct-usb: session write failed");
@@ -434,19 +532,15 @@ int runDirectSession()
         session.microphoneAcksReceived(),
         microphoneInput.lastError(), microphoneInput.lastErrorName()
     );
-    audio::sink::logStats(
-        "direct-usb",
-        audioStats,
-        mediaAudioOutput,
-        promptAudioOutput
-    );
+    mediaAudio.logStats("direct-usb");
+    promptAudio.logStats("direct-usb");
     // Stop producers before closing USB. Returning then destroys TLS and all
     // per-session buffers before the thread wrapper publishes completion.
     vitaLogInfo("direct-usb: stopping microphone");
     microphoneInput.stop();
     vitaLogInfo("direct-usb: stopping audio outputs");
-    mediaAudioOutput.close();
-    promptAudioOutput.close();
+    mediaAudio.reset();
+    promptAudio.reset();
     if (VITA_AUTO_VERBOSE_LOGGING || lastError() != AppError::None || session.lastError() != 0)
         transport.logDiagnostics("session-ended");
     closeTransport(transport);
@@ -473,11 +567,9 @@ bool start(const Settings& settings)
 {
     if (g_directUsbThread >= 0 || !canRestart())
         return false;
-    const ConnectionMode mode = settings.connection;
-    g_audioOnVita = settings.audioOnVita;
-    g_mode = mode;
-    std::snprintf(g_host, sizeof(g_host), "%s", settings.host);
-    Transport::setWakeHandler(mode == ConnectionMode::Usb ? &UsbTransport::wakeKernel : nullptr);
+    g_settings = settings;
+    // Only USB has a kernel wait to interrupt Wi-Fi receive uses a short timeout.
+    Transport::setWakeHandler(nullptr);
     __atomic_store_n(&g_stopRequested, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_status, static_cast<int>(Status::WaitingForPhone), __ATOMIC_RELEASE);
     __atomic_store_n(&g_directIoError, static_cast<int>(AppError::None), __ATOMIC_RELEASE);

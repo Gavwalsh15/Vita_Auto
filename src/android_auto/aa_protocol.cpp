@@ -35,13 +35,15 @@ void writeBe16(std::vector<uint8_t>& output, uint16_t value)
     output.push_back(static_cast<uint8_t>(value & 0xff));
 }
 
-void FrameParser::fail(FrameParseError errorCode)
+// offset: where the unparsed bytes start in buffer_ (earlier frames are only
+// removed once per push, not one at a time).
+void FrameParser::fail(FrameParseError errorCode, size_t offset)
 {
     errorCode_ = errorCode;
-    failureBufferedSize_ = buffer_.size();
+    failureBufferedSize_ = buffer_.size() - offset;
     failureHead_.fill(0);
-    const size_t copySize = std::min(buffer_.size(), failureHead_.size());
-    std::copy_n(buffer_.begin(), copySize, failureHead_.begin());
+    const size_t copySize = std::min(failureBufferedSize_, failureHead_.size());
+    std::copy_n(buffer_.begin() + offset, copySize, failureHead_.begin());
     failed_ = true;
     buffer_.clear();
 }
@@ -93,51 +95,53 @@ std::vector<Frame> FrameParser::push(
         buffer_.insert(buffer_.end(), data, data + length);
     }
 
-    while (buffer_.size() >= HEADER_SIZE)
+    // Frames are read in place and the parsed prefix is dropped once at the
+    // end, so a large receive holding many small frames is not moved per frame.
+    size_t offset = 0;
+    while (buffer_.size() - offset >= HEADER_SIZE)
     {
-        const uint8_t channel = buffer_[0];
-        const uint8_t flags = buffer_[1];
+        const uint8_t* const head = buffer_.data() + offset;
+        const size_t available = buffer_.size() - offset;
+        const uint8_t channel = head[0];
+        const uint8_t flags = head[1];
         const uint8_t frameType = flags & FRAME_TYPE_MASK;
-        const bool encrypted = (buffer_[1] & ENCRYPTED) != 0;
+        const bool encrypted = (flags & ENCRYPTED) != 0;
         const size_t headerSize = frameType == FRAME_FIRST
             ? EXTENDED_HEADER_SIZE
             : HEADER_SIZE;
 
         if ((flags & ~0x0f) != 0) {
-            fail(FrameParseError::InvalidFlags); // invalid flag bits
+            fail(FrameParseError::InvalidFlags, offset); // invalid flag bits
             break;
         }
 
-        if (buffer_.size() < headerSize)
+        if (available < headerSize)
             break;
 
-        const uint16_t bodyLength = readBe16(buffer_.data() + 2);
+        const uint16_t bodyLength = readBe16(head + 2);
         const uint32_t totalSize = frameType == FRAME_FIRST
-            ? readU32(buffer_.data() + 4)
+            ? readU32(head + 4)
             : bodyLength;
         if (bodyLength == 0 ||
             (frameType == FRAME_FIRST &&
              (totalSize == 0 || totalSize > MAX_LOGICAL_MESSAGE_SIZE)))
         {
-            fail(FrameParseError::InvalidLength); // invalid frame or extended message length
+            fail(FrameParseError::InvalidLength, offset); // invalid frame or extended message length
             break;
         }
 
         const size_t frameLength = headerSize + bodyLength;
 
-        if (buffer_.size() < frameLength)
+        if (available < frameLength)
             break;
 
-        std::vector<uint8_t> body(
-            buffer_.begin() + headerSize,
-            buffer_.begin() + frameLength
-        );
+        const uint8_t* const body = head + headerSize;
         const uint64_t frameRxFirstCompletedAtUs =
             bufferRxFirstCompletedAtUs_;
         const uint64_t frameRxLastCompletedAtUs =
             bufferRxLastCompletedAtUs_;
-        buffer_.erase(buffer_.begin(), buffer_.begin() + frameLength);
-        if (buffer_.empty()) {
+        offset += frameLength;
+        if (offset == buffer_.size()) {
             bufferRxFirstCompletedAtUs_ = 0;
             bufferRxLastCompletedAtUs_ = 0;
         } else {
@@ -154,7 +158,7 @@ std::vector<Frame> FrameParser::push(
             frame.messageId = 0;
             frame.rxFirstCompletedAtUs = frameRxFirstCompletedAtUs;
             frame.rxLastCompletedAtUs = frameRxLastCompletedAtUs;
-            frame.payload.swap(body);
+            frame.payload.assign(body, body + bodyLength);
             frames.push_back(std::move(frame));
             continue;
         }
@@ -163,17 +167,17 @@ std::vector<Frame> FrameParser::push(
         if (frameType == FRAME_BULK)
         {
             fragment = PlainFragment{};
-            if (body.size() < sizeof(uint16_t))
+            if (bodyLength < sizeof(uint16_t))
                 continue;
 
             Frame frame{};
             frame.channel = channel;
             frame.flags = flags;
             frame.encrypted = false;
-            frame.messageId = readBe16(body.data());
+            frame.messageId = readBe16(body);
             frame.rxFirstCompletedAtUs = frameRxFirstCompletedAtUs;
             frame.rxLastCompletedAtUs = frameRxLastCompletedAtUs;
-            frame.payload.assign(body.begin() + sizeof(uint16_t), body.end());
+            frame.payload.assign(body + sizeof(uint16_t), body + bodyLength);
             frames.push_back(std::move(frame));
             continue;
         }
@@ -185,17 +189,18 @@ std::vector<Frame> FrameParser::push(
             fragment.totalSize = totalSize;
             fragment.rxFirstCompletedAtUs = frameRxFirstCompletedAtUs;
             fragment.rxLastCompletedAtUs = frameRxLastCompletedAtUs;
-            fragment.payload.swap(body);
+            fragment.payload.assign(body, body + bodyLength);
             continue;
         }
 
         if (!fragment.active || fragment.messageBits != messageBits) {
             fail(!fragment.active ? FrameParseError::OrphanFragment
-                                  : FrameParseError::FragmentFlagsMismatch);
+                                  : FrameParseError::FragmentFlagsMismatch,
+                 offset);
             break;
         }
 
-        fragment.payload.insert(fragment.payload.end(), body.begin(), body.end());
+        fragment.payload.insert(fragment.payload.end(), body, body + bodyLength);
         if (frameRxFirstCompletedAtUs != 0 &&
             (fragment.rxFirstCompletedAtUs == 0 ||
              frameRxFirstCompletedAtUs < fragment.rxFirstCompletedAtUs))
@@ -205,7 +210,7 @@ std::vector<Frame> FrameParser::push(
         if (frameRxLastCompletedAtUs > fragment.rxLastCompletedAtUs)
             fragment.rxLastCompletedAtUs = frameRxLastCompletedAtUs;
         if (fragment.payload.size() > MAX_LOGICAL_MESSAGE_SIZE) {
-            fail(FrameParseError::MessageTooLarge); /* accumulated plaintext fragment is too large */
+            fail(FrameParseError::MessageTooLarge, offset); // accumulated plaintext fragment is too large
             break;
         }
 
@@ -213,7 +218,7 @@ std::vector<Frame> FrameParser::push(
             if (fragment.payload.size() != fragment.totalSize ||
                 fragment.payload.size() < sizeof(uint16_t))
             {
-                fail(FrameParseError::FinalLengthMismatch); // final plaintext size differs from FIRST
+                fail(FrameParseError::FinalLengthMismatch, offset); // final plaintext size differs from FIRST
                 break;
             }
 
@@ -232,6 +237,9 @@ std::vector<Frame> FrameParser::push(
             fragment = PlainFragment{};
         }
     }
+
+    if (!failed_ && offset > 0)
+        buffer_.erase(buffer_.begin(), buffer_.begin() + offset);
 
     return frames;
 }

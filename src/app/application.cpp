@@ -6,6 +6,7 @@
 #include "app/settings.h"
 #include "app/usb_shell_lock.h"
 #include "inputs/vita_input.h"
+#include "transport/wireless_status.h"
 #include "transport/usb_transport.h"
 #include "video/video_pipeline.h"
 #include "video/video_presenter.h"
@@ -13,6 +14,8 @@
 #include "logger/vita_log.h"
 
 #include <psp2/ctrl.h>
+#include <cstdio>
+#include <cstring>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
 
@@ -37,11 +40,18 @@ int run()
     const bool usbAvailable = UsbTransport::pluginAvailable();
     auto activeSettings = [&]() {
         Settings active = settings;
-        if (!usbAvailable)
+        if (!usbAvailable) {
             active.connection = ConnectionMode::Wireless;
+            // Bluetooth, the Wi-Fi access point and CarPlay's iAP2 link all live
+            // in the same plugin, so they are missing too.
+            active.wireless.bluetooth = false;
+            active.wireless.wifiAp = false;
+            active.carplay = false;
+        }
         return active;
     };
-    
+
+    // Set when the connection mode changes mid-attempt: stop, then reconnect now.
     bool modeSwitchPending = false;
     AppError lastError = AppError::None;
     AppError cleanupError = AppError::None;
@@ -119,13 +129,33 @@ int run()
             finishAttempt();
     };
 
+    // The Vita is renamed while Bluetooth runs; keep its own name in the
+    // settings file until it is restored, so a crash cannot lose it.
+    const auto syncDeviceName = [&]() {
+        char original[64];
+        const wireless_status::NameState nameState =
+            wireless_status::nameState(original, sizeof(original));
+        if (nameState == wireless_status::NameState::Changed &&
+            std::strcmp(settings.wireless.recoverDeviceName, original) != 0) {
+            std::snprintf(settings.wireless.recoverDeviceName, sizeof(settings.wireless.recoverDeviceName),
+                          "%s", original);
+            settingsSaved = saveSettings(settings);
+        } else if (nameState == wireless_status::NameState::Restored &&
+                   settings.wireless.recoverDeviceName[0] != '\0') {
+            settings.wireless.recoverDeviceName[0] = '\0';
+            settingsSaved = saveSettings(settings);
+        }
+    };
+
     vitaLogInfo("DIRECT USB runner start");
     beginAttempt();
     while (true) {
         if (running && direct_session::finished())
             finishAttempt();
-        if (exiting && !running)
+        if (exiting && !running) {
+            syncDeviceName();
             break;
+        }
 
         const uint64_t nowUs = sceKernelGetSystemTimeWide();
         if (running) {
@@ -141,6 +171,7 @@ int run()
 
         if (nowUs >= nextUiPollUs) {
             nextUiPollUs = nowUs + UI_POLL_US;
+            syncDeviceName();
             SceCtrlData pad{};
             if (sceCtrlPeekBufferPositive(0, &pad, 1) > 0) {
                 const uint32_t pressed = pad.buttons & ~previousButtons;
@@ -169,11 +200,16 @@ int run()
                 } else if (usbAvailable && (pressed & SCE_CTRL_SQUARE) && !streaming &&
                            !disconnectRequested &&
                            (running ? !modeSwitchPending : restartAllowed)) {
-                            
-                    settings.connection = settings.connection == ConnectionMode::Auto
-                        ? ConnectionMode::Usb
-                        : settings.connection == ConnectionMode::Usb
-                            ? ConnectionMode::Wireless : ConnectionMode::Auto;
+                    // Auto -> USB -> Wi-Fi -> CarPlay -> Auto, applied straight away.
+                    if (settings.carplay) {
+                        settings.carplay = false;
+                        settings.connection = ConnectionMode::Auto;
+                    } else if (settings.connection == ConnectionMode::Wireless) {
+                        settings.carplay = true;
+                    } else {
+                        settings.connection = settings.connection == ConnectionMode::Auto
+                            ? ConnectionMode::Usb : ConnectionMode::Wireless;
+                    }
                     settingsSaved = saveSettings(settings);
                     if (running) {
                         modeSwitchPending = true;
@@ -218,7 +254,8 @@ int run()
                 settings.audioOnVita,
                 settingsSaved,
                 activeSettings().connection,
-                usbAvailable
+                usbAvailable,
+                activeSettings().carplay
             );
             nextScreenUs = nowUs + SCREEN_REFRESH_US;
         }

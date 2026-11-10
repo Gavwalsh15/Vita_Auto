@@ -23,7 +23,7 @@ constexpr uint8_t DIRECT_MICROPHONE_CHANNEL = 7;
 
 enum class DirectState {
     Stopped,
-    VersionNegotiating = 1, // Wi-Fi only
+    VersionNegotiating = 1, // Wi-Fi only: the transport did not do it for us.
     TlsNegotiating = 3, // Preserve the existing state numbers in logs.
     TlsOk,
     ServiceReady,
@@ -36,6 +36,16 @@ enum class TouchAction : uint8_t {
     Down = 0,
     Up = 1,
     Move = 2,
+    PointerDown = 5,
+    PointerUp = 6,
+};
+
+constexpr size_t MAX_TOUCH_POINTERS = 6;
+
+struct TouchPointer {
+    uint16_t x = 0;
+    uint16_t y = 0;
+    uint32_t id = 0;
 };
 
 struct MediaFrame {
@@ -71,6 +81,8 @@ public:
     // The native USB kernel transport has already completed AA version 1.7.
     // Begin directly at the TLS stage without sending VERSION_REQUEST twice.
     bool startAfterVersion();
+    // For transports that leave version negotiation to us (Wi-Fi): send
+    // VERSION_REQUEST 1.7 and begin TLS once the phone accepts it.
     bool start();
     bool feed(
         const uint8_t* data,
@@ -88,11 +100,21 @@ public:
     void markOutboundSubmitted(uint64_t submittedAtUs);
     MediaAckStats mediaAckStats() const;
 
-    bool sendTouch(TouchAction action, uint16_t x, uint16_t y, uint32_t pointerId = 0);
+    // pointers lists every finger currently down. actionIndex says which one a
+    // PointerDown or PointerUp is about; it is 0 for the other actions.
+    bool sendTouch(
+        TouchAction action,
+        uint8_t actionIndex,
+        const TouchPointer* pointers,
+        size_t count
+    );
     bool sendButton(uint32_t keycode, bool down);
     bool sendRotary(int32_t delta);
     bool sendShutdownRequest();
     bool sendPingRequest();
+    // Unsolicited video focus: projected true gains it (asks the phone for video),
+    // false releases it to NATIVE. Does nothing until the video channel is set up.
+    bool sendVideoFocus(bool projected = true);
     bool sendMicrophone(
         const int16_t* samples,
         size_t sampleCount,
@@ -189,10 +211,6 @@ private:
     uint32_t microphoneAcksReceived_ = 0;
     std::array<DecryptedFragment, 256> decryptedFragments_{};
     MediaHandler mediaHandler_;
-    bool inboundTlsSequenceKnown_ = false;
-    uint64_t inboundTlsLastSequence_ = 0;
-    uint32_t inboundTlsRecordCount_ = 0;
-    uint32_t inboundTlsSequenceAnomalies_ = 0;
     uint64_t pendingTlsRxFirstCompletedAtUs_ = 0;
     uint64_t pendingTlsRxLastCompletedAtUs_ = 0;
     std::vector<uint8_t> tlsReadScratch_;

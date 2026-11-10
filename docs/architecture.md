@@ -1,109 +1,121 @@
 # Architecture
 
-Vita Auto is split into a Vita app, a user-mode USB bridge, and a kernel USB
-plugin. The app owns the Android Auto session and presentation. The kernel plugin
-owns USB host mode, Android Open Accessory setup, bulk pipes, and transfer
-cleanup.
+Vita Auto is a Vita app, a user-mode bridge and a kernel plugin. The app owns the
+session and presentation and runs one protocol at a time: Android Auto (USB or
+wireless) or, with `carplay=on`, wireless Apple CarPlay. The kernel plugin owns USB
+host mode, Android Open Accessory setup, bulk pipes, the Bluetooth stack (Android
+Auto's bootstrap and CarPlay's iAP2 link) and the Wi-Fi access point.
 
-For the runtime task map, USB data flow, synchronization rules, and shutdown
-invariants, read [core-tasks.md](core-tasks.md).
-
-## Source Layout
+## Source layout
 
 | Folder | Responsibility |
 | --- | --- |
-| `src/app` | Application lifecycle, connection screens, retry/exit flow |
-| `src/android_auto` | Android Auto framing, service discovery, TLS, channel logic |
-| `src/audio` | PCM playback routing and microphone capture |
-| `src/inputs` | Vita controls, touch, input events, and event queue |
-| `src/video` | H.264 parsing/decoding, frame ordering, and presentation |
-| `src/logger` | File logging and optional performance reporting |
-| `src/transport` | `Transport` interface with USB and Wi-Fi implementations, and the Auto transport that waits for both |
-| `src/common` | Shared utilities |
-| `kernel` | Kernel USB plugin, user-mode bridge, exports, and loader |
+| `src/app` | Lifecycle, connection screens, retry/exit policy (`recovery.h`), settings |
+| `src/android_auto` | Android Auto framing, service discovery, TLS, channels |
+| `src/carplay` | Wireless CarPlay: iAP2 endpoint, AirPlay control, session, Bonjour ([carplay.md](carplay.md)) |
+| `src/audio` | PCM/AAC playback and microphone capture |
+| `src/inputs` | Vita buttons, touch, input event queue |
+| `src/video` | H.264 parsing/decoding, frame ordering, presentation |
+| `src/transport` | `Transport` interface: USB, Wi-Fi (TCP), Auto (waits on all); also the Bluetooth stack (`bt_stack`), Android Auto's Bluetooth bootstrap, the Wi-Fi AP and the shared wireless settings (`wireless_config.h`) |
+| `src/logger`, `src/common` | Logging, shared utilities |
+| `kernel` | Kernel plugin (`.inc` files share one translation unit), user-mode bridge, exports, loader |
 
-## Runtime Pieces
+## Shared by Android Auto and CarPlay
 
-`vita_auto.vpk` installs the app. The VPK also contains
-`vita_auto_usb_client.suprx`, which the app loads from
-`app0:vita_auto_usb_client.suprx`.
-
-`vita_auto_usb.skprx` is installed as a taiHEN kernel plugin. It owns USB host
-mode and the Android Open Accessory negotiation.
-
-`vita_auto_usb_client.suprx` is a small user-mode bridge. It imports the kernel
-plugin syscalls and exports regular app-callable functions such as
-`vitaAutoUsbStart`, `vitaAutoUsbStop`, `vitaAutoUsbWrite`, and
-`vitaAutoUsbReadWaitTimed`.
-
-## Startup Flow
-
-1. `src/main.cpp` resets logging and calls the app runner.
-2. `src/app/application.cpp` acquires the HOME/automatic USB connection locks
-   through `src/app/usb_shell_lock.cpp`, then initializes input and display state.
-3. The app starts the direct USB session in `src/app/direct_session.cpp`.
-4. `src/transport/usb_transport.cpp` loads the client bridge from the VPK and
-   calls into the kernel plugin.
-5. The kernel plugin negotiates Android Open Accessory mode and the Android Auto
-   version handshake.
-6. `src/android_auto/aa_direct.cpp` starts TLS and Android Auto service setup.
-7. Video, audio, microphone, and input begin once the phone opens the relevant
-   Android Auto channels.
-
-## Disconnect and Reconnect
-
-Disconnect is handled as a normal session end where possible:
-
-1. The app stops accepting input for the old session.
-2. Producers are stopped before USB cleanup.
-3. The USB session is closed and transfer callbacks drain.
-4. Display resources are handed off before GXM/libvita2d resources are freed.
-5. Recoverable disconnects schedule another attempt.
-
-If USB or display cleanup cannot complete, the app asks for a Vita restart and
-prevents another connection attempt. That is safer than reusing kernel/display
-state whose ownership is unclear.
-
-HOME stays locked until USB, input, video, and display cleanup all succeed.
-Automatic retries retain the lock between attempts, so they cannot start USB
-after the user has switched to LiveArea. **Start + Select** requests a manual
-disconnect and disables automatic retries. The main loop waits for IO completion
-before joining and cleaning up. It then releases the shell locks and shows
-**Disconnected**. **Cross** acquires the locks again before starting a new session.
-
-This follows VitaShell's use of `sceShellUtilLock` for the PS button and automatic
-Content Manager USB connections. It does not interpret controller input as a
-HOME event or run USB shutdown inside a system callback.
-
-## Build Flags
-
-The default build keeps non-critical logging and performance reporting off.
-
-| Flag | Effect |
+| Piece | Where |
 | --- | --- |
-| `VITA_AUTO_VERBOSE_LOGGING` | Enables extra startup/runtime logs |
-| `VITA_AUTO_PERFORMANCE` | Enables performance counters and reports |
+| Video: H.264 queue, decoder, presentation (`video::pipeline::Frame` is the protocol-neutral input) | `src/video` |
+| Audio: one `audio::Stream` per incoming stream (PCM either byte order, or AAC-LC) into a playback port | `src/audio/audio_stream.*`, `audio_output.*`, `aac_decoder.*` |
+| Touch, buttons, input queue and latency mark | `src/inputs`, `src/video/input_mark.h` |
+| Decoder-failure and start-timeout checks | `src/app/session_watch.h` |
+| Bluetooth bring-up, status and failure checks, name handling, stream claim, event log | `src/transport/bt_stack.*` |
+| Wireless settings (Bluetooth name, Wi-Fi network, access point) | `src/transport/wireless_config.h` |
+| The network the phone is sent to: the Vita's own Wi-Fi or its access point | `src/transport/phone_network.*`, `wifi_ap.*`, `kernel/vita_auto_ap.inc` |
+| Listening TCP and bound UDP sockets | `src/transport/net_socket.*` |
+| Status and connection screens | `src/video/status_screen.*`, `src/app/connection_screen.*` |
 
+`direct_session.cpp` chooses the protocol: CarPlay runs `carplay::run()`
+([carplay.md](carplay.md)), otherwise the Android Auto loop below.
 
-Critical errors remain logged in every build.
+## Pieces
 
-## CI and Releases
+- `vita_auto.vpk` is the app. It bundles `vita_auto_usb_client.suprx`, loaded from
+  `app0:`.
+- `vita_auto_usb.skprx` is the taiHEN kernel plugin.
+- `vita_auto_usb_client.suprx` imports the plugin's syscalls and exports app-callable
+  functions (`vitaAutoUsbStart`, `vitaAutoUsbWrite`, `vitaAutoUsbReadWaitTimed`, ...).
+  The VPK and plugin must come from the same release.
 
-GitHub Actions builds two flavors:
+## Runtime tasks
 
-| Flavor | Logging | Performance |
+| Task | Files | Owns |
 | --- | --- | --- |
-| quiet | OFF | OFF |
-| diagnostic | ON | ON |
+| Main thread | `main.cpp`, `app/application.cpp` | Lifecycle, screens, retry/exit, final video presentation |
+| Session thread | `app/direct_session.cpp`, `android_auto/aa_direct*.cpp`, `transport/*`; for CarPlay `carplay/*` | Transport, AA framing, TLS, channels, audio outputs, microphone coordination; CarPlay's Bluetooth, AirPlay sockets and projection |
+| Input producer | `inputs/*` | Buttons, sticks, touch; only enqueues events |
+| Microphone worker | `audio/microphone_input.cpp` | Capture into a frame queue |
+| Video decoder worker | `video/video_pipeline.cpp` | Ordered compressed queue, H.264 decoder, latest frame |
+| Audio playback | `audio/audio_output.cpp` | One playback port per `audio::Stream` |
+| Kernel callbacks | `kernel/vita_auto_usb_bulk.inc`, `..._session.inc` | Attach/detach, transfer completion, pipe state |
+| Kernel syscalls | `kernel/vita_auto_usb_syscalls.inc`, `kernel/client/` | Start/stop/read/write/wake entry points |
 
-Tagged releases package both flavors and include checksums. Release files keep
-their runtime names inside each zip so the VPK and loader paths continue to
-match.
+```mermaid
+flowchart LR
+    Phone[Android phone] <--> Pipes[Kernel USB pipes]
+    Pipes <--> Ring[Kernel DMA/ring buffers]
+    Ring <--> Bridge[vita_auto_usb_client.suprx]
+    Bridge <--> Transport[UsbTransport]
+    Transport <--> Session[DirectSession / aa_direct]
+    Session --> Video[Video pipeline] --> Display[Main display presenter]
+    Session --> Audio[Audio output]
+    Inputs[Input producer] --> Session
+    Mic[Microphone worker] --> Session
+```
 
-## Dependency Patch
+USB reads complete in kernel callbacks into ring storage and wake user mode; the
+app reads through `UsbTransport` and routes channel payloads. Input and microphone
+producers only enqueue: the session decides when to flush so channel ordering stays
+controlled.
 
-Mbed TLS is kept as a submodule. During CMake configuration,
-`cmake/ApplyMbedTlsPatch.cmake` applies
-`patches/mbedtls-x509-legacy-timezone.patch` if needed. The patch lets the
-Android Auto head-unit certificate load its legacy numeric timezone suffix while
-leaving the original DER bytes untouched.
+## Startup
+
+1. `main.cpp` resets logging and calls the app runner.
+2. `application.cpp` takes the HOME/automatic-USB shell locks (`usb_shell_lock.cpp`)
+   and initialises input and display.
+3. `direct_session.cpp` starts the session; `usb_transport.cpp` loads the bridge and
+   the kernel plugin negotiates accessory mode and the AA version handshake.
+4. `aa_direct.cpp` starts TLS and service setup; video, audio, microphone and input
+   begin when the phone opens the channels.
+
+Wi-Fi has no kernel step, so `DirectSession::start()` sends VERSION_REQUEST itself.
+
+## Disconnect and recovery
+
+1. Stop accepting input, then stop producers before USB cleanup.
+2. Close the USB session and let transfer callbacks drain.
+3. Hand off display resources before GXM/libvita2d are freed.
+4. Recoverable outcomes schedule another attempt (`recovery.h` decides automatic
+   retry, manual retry or restart; `application.cpp` applies it, the connection
+   screen only displays it).
+
+If USB or display cleanup cannot complete, the app asks for a restart and refuses a
+new attempt rather than reuse state whose ownership is unclear. A physical unplug
+can strand USB requests without callbacks; that also needs a reboot.
+
+HOME stays locked until USB, input, video and display cleanup succeed, including
+between automatic retries (this follows VitaShell's `sceShellUtilLock`).
+**Start + Select** requests a manual disconnect and stops retries; **Cross** takes
+the locks again. For a user disconnect the IO owner calls `vitaAutoUsbDrainReads()`,
+keeps answering AA pings while it consumes the remaining packets, then sends the
+shutdown request; a timeout retains buffers and blocks a new session. The first
+error and its detail are kept until reset, and a cleanup failure never replaces it.
+
+## Build, CI, patch
+
+`VITA_AUTO_VERBOSE_LOGGING` adds startup/runtime logs and the raw Bluetooth, AirPlay
+and mDNS dumps, and `VITA_AUTO_PERFORMANCE` adds counters; outcomes and errors are
+always logged. GitHub Actions builds a quiet
+flavor (both off) and a diagnostic flavor (both on), and tagged releases package
+both with checksums. Mbed TLS is a submodule; `cmake/ApplyMbedTlsPatch.cmake`
+applies `patches/mbedtls-x509-legacy-timezone.patch` so the head-unit certificate's
+legacy timezone suffix loads without changing the DER bytes.

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace video {
 
@@ -20,6 +21,20 @@ struct H264AccessUnitInfo {
     bool hasSlice = false;
     bool parsedSps = false;
 };
+
+struct SpsRewriteInfo {
+    uint32_t spsCount = 0;
+    uint32_t rewritten = 0;
+    uint32_t failed = 0;
+    uint32_t skipped = 0;         // pictures might be reordered, so the SPS was left alone
+    uint32_t maxNumRefFrames = 0;
+    bool hadVui = false;
+    bool hadRestriction = false; // the stream already declared its own limits
+};
+
+SpsRewriteInfo rewriteSpsForLowLatency(std::vector<uint8_t>& accessUnit);
+
+bool containsIdr(const uint8_t* data, size_t size);
 
 class H264AnnexBParser {
 public:

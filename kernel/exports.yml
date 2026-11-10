@@ -26,3 +26,20 @@ vita_auto_usb:
         - ksceVitaAutoUsbReadWaitTimed: 0xA0A00010
         - ksceVitaAutoUsbStop: 0xA0A00011
         - ksceVitaAutoUsbDrainReads: 0xA0A00012
+        - ksceVitaAutoBtStart: 0xA0A00021
+        - ksceVitaAutoBtStop: 0xA0A00022
+        - ksceVitaAutoBtReadWaitTimed: 0xA0A00023
+        - ksceVitaAutoBtWrite: 0xA0A00024
+        - ksceVitaAutoBtGetInfo: 0xA0A00026
+        - ksceVitaAutoBtEnable: 0xA0A00027
+        - ksceVitaAutoBtDisable: 0xA0A00028
+        - ksceVitaAutoBtReadEvents: 0xA0A00029
+        - ksceVitaAutoBtConfigureName: 0xA0A0002B
+        - ksceVitaAutoBtGetOriginalName: 0xA0A0002C
+        - ksceVitaAutoBtConnectState: 0xA0A0002F
+        - ksceVitaAutoBtSetOptions: 0xA0A00030
+        - ksceVitaAutoBtDisconnect: 0xA0A00031
+        - ksceVitaAutoApStart: 0xA0A00040
+        - ksceVitaAutoApStop: 0xA0A00041
+        - ksceVitaAutoApKeepAlive: 0xA0A00042
+        - ksceVitaAutoApGetInfo: 0xA0A00043

@@ -1,6 +1,5 @@
 #include "android_auto/aa_tls.h"
 
-// Needed for handshake
 #include <psp2/kernel/rng.h>
 
 #include <mbedtls/ctr_drbg.h>
@@ -145,7 +144,7 @@ int TlsClient::sendCallback(void* context, const unsigned char* data, size_t len
     if (client->outbound_.empty())
         client->outboundHandshake_ = !client->secure_;
 
-    // Do not combine handshake and record output
+    // Handshake and record bytes go out in separate writes.
     if (client->outboundHandshake_ != !client->secure_)
         return MBEDTLS_ERR_SSL_WANT_WRITE;
 

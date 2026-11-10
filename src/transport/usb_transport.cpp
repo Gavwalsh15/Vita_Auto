@@ -8,7 +8,6 @@
 namespace {
 
 constexpr const char* CLIENT_BRIDGE_PATH = "app0:vita_auto_usb_client.suprx";
-constexpr uint32_t POLL_INTERVAL_US = 100000;
 constexpr uint64_t OPEN_TIMEOUT_US = 60000000;
 constexpr uint32_t WRITE_RETRY_INTERVAL_US = 250;
 constexpr uint32_t WRITE_TIMEOUT_US = 250000;
@@ -28,20 +27,6 @@ bool UsbTransport::pluginAvailable()
                     static_cast<unsigned>(loadResult));
     }
     return cached == 1;
-}
-
-bool UsbTransport::open(bool (*cancelled)())
-{
-    if (!beginOpen(cancelled))
-        return false;
-    for (;;) {
-        const OpenPoll poll = pollOpen(cancelled);
-        if (poll == OpenPoll::Connected)
-            return true;
-        if (poll == OpenPoll::Failed)
-            return false;
-        sceKernelDelayThread(POLL_INTERVAL_US);
-    }
 }
 
 bool UsbTransport::beginOpen(bool (*cancelled)())
